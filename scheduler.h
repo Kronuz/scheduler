@@ -78,22 +78,48 @@ protected:
 	std::chrono::steady_clock::time_point wakeup_time;
 	std::atomic<std::chrono::steady_clock::time_point> atom_created_at;
 	std::atomic<std::chrono::steady_clock::time_point> atom_cleared_at;
+	// Set true only by a *user* clear() (internal == false). The scheduler's own
+	// one-shot claim (clear(true)) leaves this false. The worker re-reads it at
+	// execution time so a task cancelled AFTER it was dispatched to the pool, but
+	// BEFORE it runs, does not fire — honoring "if it hasn't run yet, it never
+	// will." See ScheduledTask::operator()/cancelled() and ThreadedScheduler.
+	std::atomic_bool atom_cancelled;
 
 public:
 	ScheduledTask(std::chrono::steady_clock::time_point created_at = std::chrono::steady_clock::now()) :
 		wakeup_time(std::chrono::steady_clock::time_point{}),
 		atom_created_at(created_at),
-		atom_cleared_at(std::chrono::steady_clock::time_point{}) {}
+		atom_cleared_at(std::chrono::steady_clock::time_point{}),
+		atom_cancelled(false) {}
 
 	operator bool() const noexcept {
 		return atom_cleared_at.load() == std::chrono::steady_clock::time_point{};
 	}
 
+	// True once a user clear() has run, regardless of who won the one-shot CAS.
+	bool cancelled() const noexcept {
+		return atom_cancelled.load(std::memory_order_acquire);
+	}
+
 	void operator()() {
+		// Re-check user cancellation right before invoking the callback. On the
+		// ThreadedScheduler path the wheel thread claims the one-shot (clear(true))
+		// and THEN hands the task to a worker; a user clear() landing in that gap
+		// loses the time-CAS but still flips atom_cancelled, so we must not run.
+		if (cancelled()) {
+			return;
+		}
 		static_cast<ScheduledTaskImpl*>(this)->operator()();
 	}
 
-	bool clear(bool /*internal*/ = false) {
+	bool clear(bool internal = false) {
+		// A user cancel always records intent, even if the scheduler already won
+		// the one-shot CAS (dispatched-but-not-yet-run case). The internal one-shot
+		// claim must NOT mark the task cancelled, or every dispatched task would be
+		// suppressed by the worker's re-check.
+		if (!internal) {
+			atom_cancelled.store(true, std::memory_order_release);
+		}
 		std::chrono::steady_clock::time_point c;
 		return atom_cleared_at.compare_exchange_strong(c, std::chrono::steady_clock::now());
 	}
@@ -167,6 +193,16 @@ public:
 		try {
 			queue.add(ctx, std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count(), task);
 		} catch (const std::out_of_range&) {
+			// SILENT-DROP WARNING: the task is scheduled beyond the wheel's horizon
+			// (~24h, the span of the outermost StashSlots ring) and is being
+			// DISCARDED here. add() returns void and is on the hot path with many
+			// call sites (BaseScheduler::add, Debouncer), so widening it to report
+			// failure would be an API break that ripples through all of them; we
+			// keep the signature and instead surface the drop through the injectable
+			// trace hooks. Consumers that care should override L_DEBUG_HOOK (or the
+			// SCHEDULER_TRACE_HEADER) to make this audible — by default it is a
+			// no-op. The task's callback will simply never fire.
+			L_DEBUG_HOOK("BaseScheduler::OVERFLOW", "BaseScheduler::" + BROWN + "Stash overflow! task dropped (scheduled past the ~24h wheel horizon)" + CLEAR_COLOR);
 			L_SCHEDULER("BaseScheduler::" + BROWN + "Stash overflow!" + CLEAR_COLOR + "\n");
 		}
 	}
@@ -414,6 +450,10 @@ public:
 			if (task->clear(true)) {
 				L_SCHEDULER("ThreadedScheduler::" + STEEL_BLUE + "RUNNING" + CLEAR_COLOR + " - now:{}, wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(task->wakeup_time.time_since_epoch()).count());
 				try {
+					// The task is now dispatched but won't run until a worker picks
+					// it up. A user clear() in that window can no longer win the
+					// one-shot CAS, so it instead flips atom_cancelled; the worker
+					// re-checks it in ScheduledTask::operator() and skips the call.
 					thread_pool.enqueue(task);
 				} catch (const std::logic_error&) { }
 			}

@@ -147,6 +147,146 @@ static void test_threaded_scheduler() {
 
 
 // ---------------------------------------------------------------------------
+// 2b. ThreadedScheduler: a task cancelled AFTER it was dispatched to the worker
+//     pool, but BEFORE it runs, must NOT fire (regression for the cancelled-
+//     after-dispatch UAF/contract bug).
+//
+//     The race is hard to hit by luck, so we force the window: a single-worker
+//     pool is occupied by a blocker task that parks on an atomic gate. While the
+//     blocker holds the only worker, the target task is dispatched by the wheel
+//     and sits queued behind it. We cancel the target, then release the blocker;
+//     when the worker finally dequeues the target, the execution-time re-check
+//     must suppress it.
+// ---------------------------------------------------------------------------
+
+struct GateTask;
+using GateSched = ThreadedScheduler<GateTask, ThreadPolicyType::regular>;
+using GateTaskBase = ScheduledTask<GateSched, GateTask, ThreadPolicyType::regular>;
+
+static std::atomic<bool> g_blocker_release{false};
+static std::atomic<int>  g_blocker_ran{0};
+static std::atomic<int>  g_target_ran{0};
+
+struct GateTask : public GateTaskBase {
+	bool is_blocker;
+	explicit GateTask(bool is_blocker) : is_blocker(is_blocker) {}
+	void operator()() {
+		if (is_blocker) {
+			g_blocker_ran.fetch_add(1, std::memory_order_relaxed);
+			// Hold the single worker until the test releases us.
+			while (!g_blocker_release.load(std::memory_order_acquire)) {
+				std::this_thread::sleep_for(5ms);
+			}
+		} else {
+			g_target_ran.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+};
+
+static void test_cancel_after_dispatch() {
+	g_blocker_release.store(false);
+	g_blocker_ran.store(0);
+	g_target_ran.store(0);
+
+	// One worker only, so the blocker monopolizes the pool.
+	GateSched sched("CSCHED", "CW{:02}", 1);
+
+	auto now = std::chrono::steady_clock::now();
+
+	auto blocker = std::make_shared<GateTask>(true);
+	auto target  = std::make_shared<GateTask>(false);
+
+	// Blocker fires first and grabs the only worker; target fires shortly after
+	// and is dispatched (enqueued) but cannot run while the blocker holds it.
+	sched.add(blocker, now + 100ms);
+	sched.add(target,  now + 200ms);
+
+	// Wait until the blocker is actually running (worker is occupied).
+	for (int i = 0; i < 100 && g_blocker_ran.load() == 0; ++i) {
+		std::this_thread::sleep_for(10ms);
+	}
+	assert(g_blocker_ran.load() == 1);
+
+	// Give the wheel time to pass the target's wakeup time and dispatch it into
+	// the (now busy) pool queue.
+	std::this_thread::sleep_for(300ms);
+
+	// Cancel the target while it sits queued behind the blocker. The wheel has
+	// already claimed the one-shot, so this clear() loses the time-CAS (returns
+	// false) but still records cancellation.
+	target->clear();
+
+	// Release the blocker; the worker dequeues the target next and must skip it.
+	g_blocker_release.store(true, std::memory_order_release);
+
+	std::this_thread::sleep_for(200ms);
+	sched.finish();
+
+	assert(g_target_ran.load() == 0);   // cancelled-after-dispatch task never ran
+	std::printf("threaded scheduler OK: task cancelled after dispatch did not fire\n");
+}
+
+
+// ---------------------------------------------------------------------------
+// 2c. Debouncer: destructs cleanly at scope exit WITHOUT a manual finish(),
+//     while debounced calls are in flight (regression for the shutdown UAF).
+//
+//     The debounced callback touches a heap-allocated counter through a
+//     captured pointer; if the derived Debouncer members were torn down before
+//     the worker/scheduler threads were joined, an in-flight task would read
+//     freed state. A clean run (especially under ASan) exercises the fix.
+// ---------------------------------------------------------------------------
+
+static void test_debouncer_destructor_teardown() {
+	// Lives independently of the Debouncer so a late callback (one that ran AFTER
+	// the Debouncer's members should have been torn down) is still observable here.
+	std::atomic<int> ran{0};
+
+	{
+		auto deb = make_debouncer<int>(
+			"DEBT", "DT{:02}", 2,
+			[&ran](int /*key*/, int /*value*/) {
+				ran.fetch_add(1, std::memory_order_relaxed);
+				// A little work so a call is plausibly still in flight at scope
+				// exit, exercising the teardown ordering: the in-flight task
+				// touches debouncer.func / debouncer.throttle(key) / statuses,
+				// which is exactly the freed-memory read the destructor prevents.
+				std::this_thread::sleep_for(5ms);
+			},
+			/*throttle_time*/            0ms,
+			/*debounce_timeout*/         20ms,
+			/*debounce_busy_timeout*/    20ms,
+			/*debounce_min_force*/       40ms,
+			/*debounce_max_force*/       80ms);
+
+		// Fire a burst across several keys so tasks are scheduled and some are
+		// dispatched to the worker pool right around the time we leave scope.
+		for (int k = 0; k < 8; ++k) {
+			for (int v = 0; v < 5; ++v) {
+				deb.debounce(k, k, v);
+			}
+		}
+
+		// Leave only a short pause: we WANT to destruct (scope exit below) with
+		// work still potentially in flight, WITHOUT calling finish() ourselves.
+		std::this_thread::sleep_for(30ms);
+	}   // <-- ~Debouncer runs here; it must join the wheel + worker threads
+	    //     (and thus drain any in-flight callback) BEFORE the derived
+	    //     members (func, statuses, ...) are destroyed.
+
+	// The destructor has returned. Because it joined the threads before tearing
+	// down members, NO callback may run from here on. Snapshot, wait, re-check:
+	// a non-zero delta would mean a task outlived the object (the UAF window).
+	int after_dtor = ran.load();
+	std::this_thread::sleep_for(100ms);
+	assert(ran.load() == after_dtor);   // no callback fired after destruction
+
+	std::printf("debouncer OK: clean destructor teardown without manual finish() "
+	            "(callbacks ran: %d, none after destruction)\n", after_dtor);
+}
+
+
+// ---------------------------------------------------------------------------
 // 3. Debouncer: rapid same-key calls collapse to a single eventual call.
 // ---------------------------------------------------------------------------
 
@@ -204,7 +344,9 @@ int main() {
 	test_inline_scheduler();
 	test_clear_cancels();
 	test_threaded_scheduler();
+	test_cancel_after_dispatch();
 	test_debouncer();
+	test_debouncer_destructor_teardown();
 	std::printf("all scheduler tests passed\n");
 	return 0;
 }

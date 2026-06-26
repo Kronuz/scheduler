@@ -81,6 +81,26 @@ public:
 		assert(debounce_min_force_timeout <= debounce_max_force_timeout);
 	}
 
+	~Debouncer() {
+		// Stop and join the scheduling wheel + worker pool BEFORE this derived
+		// object's members (func, statuses, throttle_time, ...) are destroyed.
+		//
+		// Without this, ~Debouncer would finish first, then the base
+		// ~ThreadedScheduler would run finish()/join() AFTER func/statuses are
+		// already gone — and any in-flight DebouncerTask touching debouncer.func /
+		// throttle / statuses during shutdown would read freed memory (UAF).
+		//
+		// finish() is idempotent (the base destructor calls it again harmlessly:
+		// end() just re-sets a flag, thread_pool.finish() is exchange-guarded, and
+		// join() on already-exited threads returns immediately), so this is safe to
+		// call here even though the base also calls it.
+		try {
+			ThreadedScheduler<DebouncerTask<Key, Func, Tuple, thread_policy>>::finish();
+		} catch (...) {
+			L_EXC("Unhandled exception in destructor");
+		}
+	}
+
 	template <typename... Args>
 	void debounce(const Key& key, Args&&... args);
 
