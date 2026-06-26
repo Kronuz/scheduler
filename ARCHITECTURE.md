@@ -23,7 +23,7 @@ debouncer needs (`callable_traits.hh`, `random.*`).
 ## Layer 0 (dependency): the slot store
 
 The wheel is built out of [`stash`](https://github.com/Kronuz/stash)'s
-`StashSlots` and `StashValues`. `StashSlots<T, Size, CurrentKey, Div, Mod, Ring>`
+`StashSlots` and `StashValues`. `StashSlots<T, Size, Div, Mod>`
 is a keyed level: a key maps to slot `(key / Div) % Mod`, and `T` is itself a
 nested level (or, at the bottom, a `StashValues` leaf — an append-only list with
 separate walk and clean cursors). Levels nest to give multiple resolutions.

@@ -139,12 +139,12 @@ public:
 	}
 
 private:
-	/*                               <  _Tp         _Size  _CurrentKey     _Div        _Mod    _Ring >*/
-	using _tasks =        StashValues<TaskType,     10ULL,  &now>;
-	using _50_1ms =       StashSlots<_tasks,        10ULL,  &now,        1ULL * MS,    50ULL,  false>;
-	using _10_50ms =      StashSlots<_50_1ms,       10ULL,  &now,       50ULL * MS,    10ULL,  false>;
-	using _36_500ms =     StashSlots<_10_50ms,      12ULL,  &now,      500ULL * MS,    36ULL,  false>;
-	using _4800_18s =     StashSlots<_36_500ms,   4800ULL,  &now,    18000ULL * MS,  4800ULL,  true>;
+	/*                               <  _Tp        _Size       _Div         _Mod  >*/
+	using _tasks =        StashValues<TaskType,    10ULL>;
+	using _50_1ms =       StashSlots<_tasks,       10ULL,       1ULL * MS,    50ULL>;
+	using _10_50ms =      StashSlots<_50_1ms,      10ULL,      50ULL * MS,    10ULL>;
+	using _36_500ms =     StashSlots<_10_50ms,     12ULL,     500ULL * MS,    36ULL>;
+	using _4800_18s =     StashSlots<_36_500ms,  4800ULL,   18000ULL * MS,  4800ULL>;
 
 	StashContext ctx;
 	StashContext cctx;
