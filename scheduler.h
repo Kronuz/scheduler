@@ -151,21 +151,9 @@ private:
 	_4800_18s queue;
 
 public:
-	// R1: the clean safe-margin. clean() only reclaims slots this far behind the
-	// consumer, so any producer mid-add (microseconds) has long since finished
-	// before its slot is freed. A larger value tolerates longer producer stalls at
-	// the cost of holding more not-yet-reclaimed structure.
-	static constexpr unsigned long long clean_margin_ns =
-		std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::minutes(1)).count();
-
 	SchedulerQueue() :
 		ctx(now()),
-		cctx(now()) {
-		// R2: keep-out zone at the wheel horizon, matched to the clean margin, so a
-		// near-horizon insert can never alias onto a slot being reclaimed one
-		// period below.
-		ctx.horizon_margin = clean_margin_ns;
-	}
+		cctx(now()) { }
 
 	TaskType peep(std::chrono::steady_clock::time_point end_time) {
 		ctx.op = StashContext::Operation::peep;
@@ -178,6 +166,7 @@ public:
 
 	TaskType walk() {
 		ctx.op = StashContext::Operation::walk;
+		ctx.pending_floor = StashContext::IDLE;   // fresh per walk: caps first_valid at any pending leaf
 		ctx.begin_key = ctx.atom_first_valid_key.load();
 		ctx.end_key = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 		TaskType task;
@@ -196,7 +185,13 @@ public:
 	void clean() {
 		cctx.op = StashContext::Operation::clean;
 		cctx.begin_key = cctx.atom_first_valid_key.load();
-		cctx.end_key = now() - clean_margin_ns;   // R1: reclaim only this far behind the consumer
+		// Walk-based clean ("clean as walking"): reclaim up to the walk's live
+		// low-water mark, with no wall-clock margin. The strand fix (atom_ready +
+		// pending_floor) makes first_valid a safe boundary -- a leaf with any
+		// in-flight insert pins it and a late insert lowers it -- so everything
+		// strictly below it has been walked and drained. This replaces the old R1
+		// now-margin cutoff, which reclaimed completed-but-overdue tasks under load.
+		cctx.end_key = ctx.atom_first_valid_key.load();
 		TaskType task;
 		queue.next(cctx, &task);
 	}
