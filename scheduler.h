@@ -151,9 +151,21 @@ private:
 	_4800_18s queue;
 
 public:
+	// R1: the clean safe-margin. clean() only reclaims slots this far behind the
+	// consumer, so any producer mid-add (microseconds) has long since finished
+	// before its slot is freed. A larger value tolerates longer producer stalls at
+	// the cost of holding more not-yet-reclaimed structure.
+	static constexpr unsigned long long clean_margin_ns =
+		std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::minutes(1)).count();
+
 	SchedulerQueue() :
 		ctx(now()),
-		cctx(now()) {}
+		cctx(now()) {
+		// R2: keep-out zone at the wheel horizon, matched to the clean margin, so a
+		// near-horizon insert can never alias onto a slot being reclaimed one
+		// period below.
+		ctx.horizon_margin = clean_margin_ns;
+	}
 
 	TaskType peep(std::chrono::steady_clock::time_point end_time) {
 		ctx.op = StashContext::Operation::peep;
@@ -184,7 +196,7 @@ public:
 	void clean() {
 		cctx.op = StashContext::Operation::clean;
 		cctx.begin_key = cctx.atom_first_valid_key.load();
-		cctx.end_key = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch() - 1min).count();
+		cctx.end_key = now() - clean_margin_ns;   // R1: reclaim only this far behind the consumer
 		TaskType task;
 		queue.next(cctx, &task);
 	}
