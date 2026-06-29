@@ -251,6 +251,28 @@ single call carrying the last arguments. It prints `all scheduler tests passed`
 and exits 0. The scheduler is timing-based; the test uses generous windows, not
 tight races.
 
+## Examples
+
+[`examples/demo.cc`](examples/demo.cc) is a runnable tour of the core engine. A
+top-level CMake build produces it next to the test:
+
+```sh
+cmake -B build && cmake --build build && ./build/scheduler_demo
+```
+
+It schedules three tasks out of insertion order and watches them fire in time
+order on an inline `Scheduler`; cancels a task with `clear()` before it fires and
+shows it skipped; dispatches a batch of due tasks to a `ThreadedScheduler`'s
+worker pool; and hammers a `Debouncer` key with a 30-touch burst to watch it
+coalesce into roughly one delayed call carrying the last value (plus a second key
+that fires once and a third via `delayed_debounce`). Each section prints labelled
+output, including when each task fired relative to when it was scheduled.
+
+[`examples/colored_trace/`](examples/colored_trace/) is a separate, specialized
+example: it injects a `SCHEDULER_TRACE_HEADER` that turns the library's no-op
+trace hooks into colored, `std::format`-rendered output, demonstrating the
+tracing seam described above. See its own `README.md` for the build flags.
+
 ## Provenance
 
 Extracted from [Xapiand](https://github.com/Kronuz/Xapiand), where this engine
