@@ -8,16 +8,16 @@ include(FetchContent)
 #   stash       — the lock-free hierarchical slot store (the timer-wheel primitive)
 #   threadpool  — Thread<Impl,policy> + ThreadPolicyType + ThreadPool (+ TaskQueue)
 # Both are public (consumers see stash.h / thread.hh / threadpool.hh on their
-# include path), pinned to the SHAs the scheduler was extracted against.
+# include path), tracking their default-branch tips.
 FetchContent_Declare(
   stash
   GIT_REPOSITORY https://github.com/Kronuz/stash.git
-  GIT_TAG        a42e173c20a77a517055d0567c2f5466859f845d  # sentinel frontier
+  GIT_TAG        main  # track tip
 )
 FetchContent_Declare(
   threadpool
   GIT_REPOSITORY https://github.com/Kronuz/threadpool.git
-  GIT_TAG        2c48981c9a0f2c3391d337ca552a3ba8f78b1951
+  GIT_TAG        main
 )
 FetchContent_MakeAvailable(stash threadpool)
 
