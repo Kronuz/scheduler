@@ -308,16 +308,26 @@ static void test_debouncer() {
 		/*debounce_max_force*/       250ms);
 
 	// Hammer key 1 with 30 rapid touches; only the last value (29) should win.
+	const auto burst_start = std::chrono::steady_clock::now();
 	for (int v = 0; v < 30; ++v) {
 		deb.debounce(1, 1, v);
 		std::this_thread::sleep_for(2ms);   // fast enough to keep pushing it out
 	}
+	const auto burst = std::chrono::steady_clock::now() - burst_start;
 
 	// Touch key 2 once.
 	deb.debounce(2, 2, 7);
 
-	// Wait past the force window so everything has fired.
-	std::this_thread::sleep_for(500ms);
+	// Wait until both keys' last values fired, however slow the machine.
+	for (auto until = std::chrono::steady_clock::now() + 5s; std::chrono::steady_clock::now() < until;) {
+		{
+			std::lock_guard<std::mutex> lk(g_deb_mtx);
+			bool last1 = false, last2 = false;
+			for (auto& [k, v] : g_deb_calls) { last1 |= k == 1 && v == 29; last2 |= k == 2 && v == 7; }
+			if (last1 && last2) { break; }
+		}
+		std::this_thread::sleep_for(10ms);
+	}
 	deb.finish();
 
 	std::lock_guard<std::mutex> lk(g_deb_mtx);
@@ -328,9 +338,11 @@ static void test_debouncer() {
 		if (k == 2) { ++key2_calls; key2_val = v; }
 	}
 
-	// 30 rapid touches of key 1 collapsed: far fewer than 30 calls (the force
-	// window may let one through mid-burst, so allow up to a few, not 30).
-	assert(key1_calls >= 1 && key1_calls <= 3);
+	// 30 rapid touches of key 1 collapsed: the force window lets at most one call through per
+	// minimum force interval of the burst, plus the final one; a slow machine stretches the
+	// burst, so the bound follows its measured length.
+	const int forced = static_cast<int>(burst / 150ms);
+	assert(key1_calls >= 1 && key1_calls <= 2 + forced);
 	assert(key1_last == 29);            // the last value always wins
 	assert(key2_calls == 1);            // single touch -> single call
 	assert(key2_val == 7);
