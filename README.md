@@ -1,5 +1,7 @@
 # scheduler
 
+[![CI](https://github.com/Kronuz/scheduler/actions/workflows/ci.yml/badge.svg)](https://github.com/Kronuz/scheduler/actions/workflows/ci.yml)
+
 A small C++20 **timer-wheel scheduler** and a per-key **debouncer** built on it,
 extracted from [Xapiand](https://github.com/Kronuz/Xapiand).
 
