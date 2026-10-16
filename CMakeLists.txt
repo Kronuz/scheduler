@@ -4,7 +4,7 @@ project(scheduler LANGUAGES CXX)
 include(FetchContent)
 
 # --- Dependencies ---
-# The scheduler is built on two already-extracted standalone libraries:
+# The scheduler is built on three already-extracted standalone libraries:
 #   stash       — the lock-free hierarchical slot store (the timer-wheel primitive)
 #   threadpool  — Thread<Impl,policy> + ThreadPolicyType + ThreadPool (+ TaskQueue)
 # Both are public (consumers see stash.h / thread.hh / threadpool.hh on their
@@ -20,17 +20,24 @@ FetchContent_Declare(
   GIT_TAG        main
 )
 FetchContent_MakeAvailable(stash threadpool)
+# random_time (the debouncer's force window) comes from the random library; reuse
+# a consumer's copy when it already made one available.
+if(NOT TARGET random::random)
+  FetchContent_Declare(
+    random
+    GIT_REPOSITORY https://github.com/Kronuz/random.git
+    GIT_TAG        main
+  )
+  FetchContent_MakeAvailable(random)
+endif()
 
 # --- Library target ---
-# The scheduler headers are header-only, but the debouncer needs the three
-# uniform-random helpers in random.cc, so the target is a small STATIC library
-# carrying that one translation unit. Consumers that only use scheduler.h still
-# link it harmlessly. The source dir is exposed so scheduler.h / debouncer.h /
-# the bundled scheduler_trace.h are on the include path.
-add_library(scheduler STATIC random.cc)
-target_include_directories(scheduler PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_compile_features(scheduler PUBLIC cxx_std_20)
-target_link_libraries(scheduler PUBLIC stash threadpool::threadpool)
+# Header-only. The source dir is exposed so scheduler.h / debouncer.h / the bundled
+# scheduler_trace.h are on the include path.
+add_library(scheduler INTERFACE)
+target_include_directories(scheduler INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(scheduler INTERFACE cxx_std_20)
+target_link_libraries(scheduler INTERFACE stash threadpool::threadpool random::random)
 # Alias so consumers can link `scheduler::scheduler` whether they add this via
 # add_subdirectory or FetchContent.
 add_library(scheduler::scheduler ALIAS scheduler)

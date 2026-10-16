@@ -18,7 +18,8 @@ Three layers, each in one header, stacked strictly:
 
 `stash` and the thread/pool primitives are their own libraries, pulled in by
 `FetchContent`. This repo is the top two layers plus the small pieces the
-debouncer needs (`callable_traits.hh`, `random.*`).
+debouncer needs (`callable_traits.hh`); `random_time` comes from the
+[random](https://github.com/Kronuz/random) library.
 
 ## Layer 0 (dependency): the slot store
 

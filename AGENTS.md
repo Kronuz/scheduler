@@ -11,8 +11,6 @@ easy to fall into.
 scheduler.h                 The timer wheel: ScheduledTask, SchedulerQueue, BaseScheduler, Scheduler, ThreadedScheduler. Header.
 debouncer.h                 Debouncer, DebouncerTask, make_(unique_/shared_)debouncer factories. Header.
 callable_traits.hh          Callable introspection (return/args/arity). Copied verbatim from Xapiand; zero deps. Header.
-random.hh                   Decls for random_real / random_int / random_time. Header.
-random.cc                   The only .cc: the three uniform-random helpers (mt19937_64 behind a thread_local rng()).
 scheduler_trace.h           No-op L_NOTHING / L_DEBUG_HOOK / L_EXC / L_CALL hooks (stand in for Xapiand's log.h/colors.h).
 test/test.cc                Tests: inline Scheduler order, clear() cancel, ThreadedScheduler, Debouncer collapse and force window.
 examples/colored_trace/     Runnable demo that injects a real trace header to restore colored, formatted trace output.
@@ -25,11 +23,11 @@ examples/demo.cc            A runnable tour (target scheduler_demo).
 ARCHITECTURE.md             Internal design, the timing model, trade-offs.
 ```
 
-Only `random.cc` is compiled into the library; everything else is header-only.
-The two dependencies — [`stash`](https://github.com/Kronuz/stash) (the slot
-store) and [`threadpool`](https://github.com/Kronuz/threadpool) (Thread +
-ThreadPool + ThreadPolicyType) — are pulled in by `FetchContent` at their `main` tips
-and provide `stash.h`, `thread.hh`, `threadpool.hh` on the include path.
+The library is header-only. Its three dependencies — [`stash`](https://github.com/Kronuz/stash)
+(the slot store), [`threadpool`](https://github.com/Kronuz/threadpool) (Thread +
+ThreadPool + ThreadPolicyType), and [`random`](https://github.com/Kronuz/random)
+(`random_time`) — are pulled in by `FetchContent` at their `main` tips and provide
+`stash.h`, `thread.hh`, `threadpool.hh`, and `random.hh` on the include path.
 
 ## Build and run the test
 
@@ -121,9 +119,10 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   render those, and it is a *compile-time* error, not catchable at runtime. The
   example's `trace.h` stringifies arguments itself to sidestep this; a real
   logger (Xapiand's) has a formatter that handles its own types.
-- **Don't drop `random.cc` from the library.** It is the one translation unit;
-  the debouncer's `random_time` lives there. A header-only INTERFACE target would
-  leave `random_*` unresolved at link time for any consumer using the debouncer.
+- **`random_time` comes from the random library.** Don't vendor it back: a binary
+  that links both would carry two definitions. CMake reuses a consumer's
+  `random::random` target when one exists, so declare random before scheduler if you
+  name its FetchContent differently.
 - **The deps track `main`.** `CMakeLists.txt` fetches `stash` and `threadpool` at
   their tips, so a change there reaches this build (the nightly CI run catches
   drift). The wheel relies on `stash`'s `StashSlots`/`StashValues` API and the scheduler
@@ -140,9 +139,8 @@ decoupling:
   `scheduler_trace.h` (no-op by default). The `stash.h`, `thread.hh`,
   `threadpool.hh` includes are unchanged but now resolve to the FetchContent'd
   standalone libraries.
-- `random.cc`/`random.hh` carry only the three uniform-random helpers the
-  debouncer uses (`random_real`, `random_int`, `random_time`). Xapiand's
-  `random_string` (which pulled in `repr` and other Xapiand code) was left behind.
+- The uniform-random helpers come from the
+  [random](https://github.com/Kronuz/random) library, as in Xapiand.
 - `callable_traits.hh` was copied verbatim — it had zero Xapiand dependencies
   already.
 
