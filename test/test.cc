@@ -351,6 +351,37 @@ static void test_debouncer() {
 	            key1_calls, key1_last, key2_calls, key2_val);
 }
 
+// A touch landing while the pending call is pinned at the force deadline still delivers its
+// value: touches every 10ms push out by 50ms until clamped at 150ms, where the last ones land.
+static void test_debouncer_force_window() {
+	std::mutex mtx;
+	std::vector<int> calls;
+	auto deb = make_debouncer<int>(
+		"DFW", "DF{:02}", 2,
+		[&](int, int value) {
+			std::lock_guard<std::mutex> lk(mtx);
+			calls.push_back(value);
+		},
+		0ms, 50ms, 50ms, 150ms, 150ms);
+	const auto start = std::chrono::steady_clock::now();
+	int last = 0;
+	for (int v = 0; std::chrono::steady_clock::now() - start < 140ms; ++v) {
+		deb.debounce(1, 1, v);
+		last = v;
+		std::this_thread::sleep_for(10ms);
+	}
+	for (auto until = std::chrono::steady_clock::now() + 5s; std::chrono::steady_clock::now() < until;) {
+		{
+			std::lock_guard<std::mutex> lk(mtx);
+			if (!calls.empty() && calls.back() == last) { break; }
+		}
+		std::this_thread::sleep_for(10ms);
+	}
+	deb.finish();
+	std::lock_guard<std::mutex> lk(mtx);
+	assert(!calls.empty() && calls.back() == last);
+	std::printf("debouncer force window OK: %zu call(s), last value %d delivered\n", calls.size(), last);
+}
 
 int main() {
 	test_inline_scheduler();
@@ -358,6 +389,7 @@ int main() {
 	test_threaded_scheduler();
 	test_cancel_after_dispatch();
 	test_debouncer();
+	test_debouncer_force_window();
 	test_debouncer_destructor_teardown();
 	std::printf("all scheduler tests passed\n");
 	return 0;

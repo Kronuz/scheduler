@@ -265,16 +265,9 @@ Debouncer<Key, Func, Tuple, thread_policy>::delayed_debounce(std::chrono::millis
 		}
 
 		if (status->task) {
-			if (status->task->throttler) {
-				// if throttling, use throttler wakeup time:
-				if (next_wakeup_time < status->task->wakeup_time) {
-					next_wakeup_time = status->task->wakeup_time;
-				}
-			} else {
-				// if task is already waking up some time in the future, do nothing:
-				if (next_wakeup_time <= status->task->wakeup_time) {
-					return;
-				}
+			// Never fire earlier than the pending task; it is replaced so the latest arguments win.
+			if (next_wakeup_time < status->task->wakeup_time) {
+				next_wakeup_time = status->task->wakeup_time;
 			}
 			status->task->clear();
 		}
