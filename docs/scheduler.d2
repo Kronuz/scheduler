@@ -1,0 +1,35 @@
+# scheduler: a 24-hour timer wheel, its thread, and the debouncer on top.
+# Render: d2 --layout elk --sketch --theme 302 docs/scheduler.d2 docs/scheduler.svg
+direction: right
+
+callers: Callers {
+  style.multiple: true
+  label: "add(task, when)\ndebounce(key, args…)"
+}
+
+debouncer: Debouncer {
+  label: "Debouncer\nper-key coalescing\nrandomized force window"
+}
+
+wheel: SchedulerQueue {
+  label: "24 h wheel (stash)\n4800×18 s → 36×500 ms\n→ 10×50 ms → 50×1 ms"
+}
+
+thread: Scheduler thread {
+  label: "scheduler thread\npeep · sleep · walk · clean"
+}
+
+inline: Scheduler {
+  label: "Scheduler\nruns due tasks inline"
+}
+
+pool: ThreadedScheduler {
+  label: "ThreadedScheduler\ndispatches to a pool"
+}
+
+callers -> wheel
+callers -> debouncer
+debouncer -> wheel
+wheel -> thread
+thread -> inline
+thread -> pool

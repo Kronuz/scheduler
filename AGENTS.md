@@ -14,18 +14,21 @@ callable_traits.hh          Callable introspection (return/args/arity). Copied v
 random.hh                   Decls for random_real / random_int / random_time. Header.
 random.cc                   The only .cc: the three uniform-random helpers (mt19937_64 behind a thread_local rng()).
 scheduler_trace.h           No-op L_NOTHING / L_DEBUG_HOOK / L_EXC / L_CALL hooks (stand in for Xapiand's log.h/colors.h).
-test/test.cc                Runnable smoke test: inline Scheduler order, clear() cancel, ThreadedScheduler, Debouncer collapse.
+test/test.cc                Tests: inline Scheduler order, clear() cancel, ThreadedScheduler, Debouncer collapse and force window.
 examples/colored_trace/     Runnable demo that injects a real trace header to restore colored, formatted trace output.
 CMakeLists.txt              STATIC library `scheduler` (+ alias scheduler::scheduler); FetchContents stash + threadpool; CTest test `scheduler`.
 LICENSE                     MIT, Copyright (c) 2015-2019 Dubalu LLC.
-README.md                   What it is, install, usage, API reference, tracing.
+README.md                   What it is, install, quick start.
+docs/API.md                 The API reference and the tracing hooks.
+docs/scheduler.d2           The README diagram's source (docs/scheduler.svg is rendered from it).
+examples/demo.cc            A runnable tour (target scheduler_demo).
 ARCHITECTURE.md             Internal design, the timing model, trade-offs.
 ```
 
 Only `random.cc` is compiled into the library; everything else is header-only.
 The two dependencies — [`stash`](https://github.com/Kronuz/stash) (the slot
 store) and [`threadpool`](https://github.com/Kronuz/threadpool) (Thread +
-ThreadPool + ThreadPolicyType) — are pulled in by `FetchContent` at pinned SHAs
+ThreadPool + ThreadPolicyType) — are pulled in by `FetchContent` at their `main` tips
 and provide `stash.h`, `thread.hh`, `threadpool.hh` on the include path.
 
 ## Build and run the test
@@ -34,8 +37,8 @@ and provide `stash.h`, `thread.hh`, `threadpool.hh` on the include path.
 cmake -B build && cmake --build build && ctest --test-dir build
 ```
 
-The first `cmake -B build` clones `stash` and `threadpool` from GitHub at the
-pinned SHAs in `CMakeLists.txt`. Expected output ends with
+The first `cmake -B build` clones `stash` and `threadpool` from GitHub at
+their `main` tips. Expected output ends with
 `all scheduler tests passed`, exit 0. The CMake `scheduler` target is a `STATIC`
 library that requests `cxx_std_20`, links `stash` and `threadpool::threadpool`,
 and exposes the source dir as a `PUBLIC` include. The test target is
@@ -121,9 +124,9 @@ and exposes the source dir as a `PUBLIC` include. The test target is
 - **Don't drop `random.cc` from the library.** It is the one translation unit;
   the debouncer's `random_time` lives there. A header-only INTERFACE target would
   leave `random_*` unresolved at link time for any consumer using the debouncer.
-- **The deps are pinned by SHA.** `CMakeLists.txt` fetches `stash` and
-  `threadpool` at specific commits. If you bump them, re-run the build and test;
-  the wheel relies on `stash`'s `StashSlots`/`StashValues` API and the scheduler
+- **The deps track `main`.** `CMakeLists.txt` fetches `stash` and `threadpool` at
+  their tips, so a change there reaches this build (the nightly CI run catches
+  drift). The wheel relies on `stash`'s `StashSlots`/`StashValues` API and the scheduler
   on `threadpool`'s `Thread`/`ThreadPool`/`ThreadPolicyType`.
 
 ## Standalone vs. Xapiand
@@ -143,7 +146,10 @@ decoupling:
 - `callable_traits.hh` was copied verbatim — it had zero Xapiand dependencies
   already.
 
-The scheduler logic is otherwise unchanged. Keep extraction hygiene separate from
-behavior changes so they can be reconciled with upstream. To restore Xapiand's
-tracing/coloring without editing these files, see "Tracing and coloring" in
-`README.md`.
+Since the extraction the logic has diverged in two places: the queue's `clean` is
+walk-based (stash's sentinel frontier), and a debouncer touch always replaces the
+pending call, so the latest arguments win (`e7954f2`). Xapiand now fetches this
+library at `main`, so it runs the same code. Keep extraction hygiene separate from behavior
+changes so they can be reconciled with upstream. To restore Xapiand's tracing and
+coloring without editing these files, see "Tracing and coloring" in
+[docs/API.md](docs/API.md).

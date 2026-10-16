@@ -57,7 +57,9 @@ overflows: `StashSlots::add` throws `std::out_of_range("stash overflow")`, which
 The queue keeps two `StashContext`s: `ctx` for peep/walk (consume), `cctx` for
 clean (GC). `clean_checkpoint()` snapshots the first/last valid keys from `ctx`
 into `cctx` before each clean so the GC chases the consumer without racing it.
-`clean()` collects slots older than a minute.
+`clean()` reclaims up to the walk's low-water mark (`ctx`'s first valid key), with
+no wall-clock margin: stash's sentinel frontier and pending floor make that a safe
+boundary, so a task that is overdue but not yet run is never reclaimed.
 
 ### `ScheduledTask` — the cancellable unit
 
@@ -128,9 +130,9 @@ and keeps a per-key status map (`unordered_map<Key, Status>` under a mutex). Eac
   result is clamped to never exceed `max_wakeup_time`. So a key that is touched
   forever still fires by the force window. The randomization spreads a thundering
   herd of simultaneously-due keys across time instead of firing them all at once.
-- If a task is already scheduled for the key, the new wakeup either replaces it
-  (clearing the old task) or — if the existing task already wakes no later than
-  the new time — does nothing.
+- If a task is already scheduled for the key, the touch replaces it (clearing the
+  old task), keeping the later of the two wakeup times, so the call fires with the
+  latest arguments. A touch never fires a key earlier than it was already due.
 
 When the task fires (`DebouncerTask::operator()`), it calls `throttle(key)` then
 `std::apply(func, args)` with the last-seen arguments. `throttle`:

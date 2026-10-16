@@ -1,291 +1,130 @@
 # scheduler
 
 [![CI](https://github.com/Kronuz/scheduler/actions/workflows/ci.yml/badge.svg)](https://github.com/Kronuz/scheduler/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 
-A small C++20 **timer-wheel scheduler** and a per-key **debouncer** built on it,
-extracted from [Xapiand](https://github.com/Kronuz/Xapiand).
+A C++20 timer-wheel scheduler and a per-key debouncer: schedule cancellable tasks
+up to 24 hours ahead at 1 ms resolution, and collapse bursts of calls for the same
+key into one. For services that run timers, deferred flushes, or rate-limited
+background work.
 
-## What it is
+![scheduler: callers and the debouncer feed a 24-hour wheel; its thread runs due tasks inline or on a pool](docs/scheduler.svg)
 
-`scheduler` is a 24-hour, multi-resolution timer wheel with a background thread
-that runs tasks when they come due. You schedule a cancellable task at a future
-wakeup time; the thread sleeps until the earliest task is due (or until adding a
-task wakes it sooner), runs everything due, and goes back to sleep. Two flavors:
+## ✨ Highlights
 
-- `Scheduler` runs each due task **inline** on the scheduler thread. This is what
-  Xapiand's logger thread uses.
-- `ThreadedScheduler` **dispatches** each due task to a worker pool, so a slow
-  task can't stall the wheel.
+- **A 24-hour wheel at 1 ms resolution** built on the lock-free
+  [stash](https://github.com/Kronuz/stash) slot store: adding a task never takes a
+  lock.
+- **Cancellable tasks.** `clear()` is one compare-and-swap; a cleared task is
+  skipped when the wheel reaches it.
+- **Two runners.** `Scheduler` runs due tasks inline on its thread;
+  `ThreadedScheduler` dispatches them to a worker pool, so a slow task cannot stall
+  the wheel.
+- **A debouncer** that coalesces rapid touches of a key into one call with the
+  latest arguments, with a randomized force window so a key touched forever still
+  fires and many keys due at once spread out.
+- **Optional throttling**: a floor on how often a key can fire.
 
-On top of `ThreadedScheduler` sits the `Debouncer`: a per-key throttle/debounce.
-Rapid touches of the same key collapse into a single eventual call, with a
-randomized "force window" that guarantees a forever-touched key still fires while
-spreading a thundering herd of due keys across time. Xapiand drives every
-debounced fsync, commit, and replication trigger through it.
+## 📦 Installation
 
-It is three layers, each in one header, stacked cleanly:
-
-```
-  stash.h        a lock-free hierarchical slot store (the timer-wheel primitive; a separate library)
-      ▲
-  scheduler.h    a 24-hour multi-resolution timer wheel + a thread that runs due tasks
-      ▲
-  debouncer.h    per-key throttle / debounce on top of the scheduler
-```
-
-## How it works
-
-`SchedulerQueue` nests four `StashSlots` levels (from the
-[`stash`](https://github.com/Kronuz/stash) library) over a `StashValues` leaf
-into a single 24-hour wheel keyed on nanoseconds since the steady-clock epoch:
-
-```
-  4800 × 18 s  →  36 × 500 ms  →  10 × 50 ms  →  50 × 1 ms  →  task list
-       └── 4800 × 18 s = 86 400 s = exactly 24 h of horizon, at 1 ms granularity
-```
-
-A task scheduled more than ~24 h out overflows the wheel (caught and logged). The
-queue exposes `peep` (earliest upcoming, no mutation), `walk` (drain everything
-due now), `clean` (GC slots older than a minute), and `add`.
-
-`BaseScheduler` is a `Thread` (from the
-[`threadpool`](https://github.com/Kronuz/threadpool) library) whose loop proposes
-a wakeup (30 s idle, 100 ms when tasks pend), `peep`s for anything sooner, then
-sleeps on a condition variable until that time **or** an `add()` notify wakes it,
-then `walk`s the due tasks and `clean`s. One mutex, one condvar, a lock-free
-queue. `Scheduler` and `ThreadedScheduler` derive from it and differ only in how
-they run a due task (inline vs. dispatched to the pool).
-
-`ScheduledTask` is a CRTP, `enable_shared_from_this` task with a `wakeup_time`
-and atomic created/cleared timestamps. `clear()` cancels it with a single CAS, so
-a scheduled callback is cancellable — the debouncer leans on this heavily.
-
-## Install
-
-CMake with `FetchContent`:
+Requires a C++20 compiler and CMake 3.14 or newer. It fetches
+[stash](https://github.com/Kronuz/stash) and
+[threadpool](https://github.com/Kronuz/threadpool) at their `main` tips. CI builds
+it on Linux (x86_64, arm64), macOS (arm64, x86_64), and FreeBSD, plus ASan, UBSan,
+and TSan builds.
 
 ```cmake
 include(FetchContent)
-FetchContent_Declare(
-  scheduler
+FetchContent_Declare(scheduler
   GIT_REPOSITORY https://github.com/Kronuz/scheduler.git
-  GIT_TAG        main
-)
+  GIT_TAG        main)
 FetchContent_MakeAvailable(scheduler)
 
-target_link_libraries(your_target PRIVATE scheduler::scheduler)
+target_link_libraries(my_app PRIVATE scheduler::scheduler)
 ```
 
-`scheduler` itself `FetchContent`s its two dependencies —
-[`stash`](https://github.com/Kronuz/stash) (the slot store) and
-[`threadpool`](https://github.com/Kronuz/threadpool) (the thread + pool) — at the
-exact SHAs it was extracted against, so you get the whole stack from one
-`FetchContent_Declare`. The `scheduler` target is a small `STATIC` library (it
-compiles one `.cc`, `random.cc`, for the debouncer's RNG helpers), requests
-`cxx_std_20`, and puts the source dirs of all three libraries on your include
-path. Then:
+## 🚀 Quick start
 
-```cpp
-#include "scheduler.h"   // Scheduler, ThreadedScheduler, ScheduledTask
-#include "debouncer.h"   // Debouncer, make_debouncer, ...
-```
-
-Requires C++20. On macOS it builds with AppleClang/libc++, the same toolchain
-Xapiand uses.
-
-## Usage
-
-### A scheduled, cancellable task
-
-`ScheduledTask` is CRTP: derive a task `Impl` with an `operator()`, and use it as
-both the scheduler's and the task's template argument.
+A task is a class deriving from `ScheduledTask` (CRTP) with an `operator()`:
 
 ```cpp
 #include "scheduler.h"
+
+#include <chrono>
 #include <memory>
 
-struct MyTask;
-using Sched = Scheduler<MyTask, ThreadPolicyType::regular>;
-using Base  = ScheduledTask<Sched, MyTask, ThreadPolicyType::regular>;
-
-struct MyTask : Base {
-    void operator()() { /* runs on the scheduler thread when due */ }
+struct Ping;
+using Sched = Scheduler<Ping>;
+struct Ping : ScheduledTask<Sched, Ping> {
+	void operator()() { /* runs on the scheduler thread when due */ }
 };
 
-Sched sched("SCHED");
-auto t = std::make_shared<MyTask>();
-sched.add(t, std::chrono::steady_clock::now() + std::chrono::milliseconds(200));
-
-// Cancel before it fires (a single CAS); if it hasn't run yet, it never will:
-t->clear();
-
-sched.finish();   // stop the thread and join
+int main() {
+	Sched sched("SCHED");
+	auto ping = std::make_shared<Ping>();
+	sched.add(ping, std::chrono::steady_clock::now() + std::chrono::milliseconds(200));
+	ping->clear();     // cancel: if it has not run, it never will
+	sched.finish();
+}
 ```
 
-`ThreadedScheduler<MyTask, policy>` is identical to construct except it also
-takes a worker-name format and a thread count
-(`ThreadedScheduler sched("TSCHED", "TW{:02}", 4)`), and runs due tasks on the
-pool instead of inline.
-
-### A debouncer
-
-`make_debouncer<Key>(...)` deduces the callback's argument tuple from the
-callback itself (via `callable_traits`), so you just pass a lambda:
+A debouncer deduces its argument types from the callback:
 
 ```cpp
 #include "debouncer.h"
 
-auto deb = make_debouncer<int>(
-    "DEB", "DW{:02}", /*threads*/ 2,
-    [](int key, int value) { /* called once per settled key */ },
-    /*throttle_time*/        0ms,
-    /*debounce_timeout*/     50ms,    // a fresh key fires after this
-    /*debounce_busy_timeout*/50ms,    // subsequent touches push it out by this
-    /*min_force*/           150ms,    // but never past now + random(min, max)
-    /*max_force*/           250ms);
+using namespace std::chrono_literals;
 
-for (int v = 0; v < 100; ++v) deb.debounce(1, /*key*/1, /*value*/v);
-// -> the callback runs ~once for key 1, with the last value, not 100 times.
+auto deb = make_debouncer<int>("DEB", "DW{:02}", /*threads*/ 2,
+	[](int key, int value) { /* once per settled key, with the latest value */ },
+	/*throttle*/ 0ms, /*timeout*/ 50ms, /*busy timeout*/ 50ms,
+	/*force window*/ 150ms, 250ms);
+
+for (int v = 0; v < 100; ++v) { deb.debounce(1, /*key*/ 1, /*value*/ v); }
+// The callback runs about once for key 1, with value 99.
 ```
 
-`make_unique_debouncer` / `make_shared_debouncer` return the same thing wrapped in
-a `unique_ptr` / `shared_ptr`. `delayed_debounce(delay, key, args...)` adds a
-fixed delay on top.
+[`examples/demo.cc`](examples/demo.cc) tours both: ordering, cancellation, a
+worker pool, and a debounced burst.
 
-## API reference
+## 🎯 When to use it
 
-### `ScheduledTask<SchedulerImpl, ScheduledTaskImpl, ThreadPolicyType policy = regular>`
+- ✅ Many timers or deferred jobs, cancelled often, at millisecond resolution:
+  timeouts, deferred commits and flushes, retries.
+- ✅ Coalescing bursts per key: "fsync this file soon", "replicate this shard soon".
+- ❌ Sub-millisecond deadlines or hard real-time: the wheel's resolution is 1 ms
+  and tasks run on a regular thread.
+- ❌ Tasks more than 24 hours out: they overflow the wheel and are dropped (and
+  logged through the trace hook).
 
-CRTP base for a cancellable scheduled task.
+## 📚 Documentation
 
-- `operator bool()` — true while not yet cleared.
-- `clear() -> bool` — cancel; the first call wins a CAS and returns true, later
-  calls return false. A cleared task is skipped when it comes due.
-- derive `Impl` with `void operator()()` — your task body.
+- [docs/API.md](docs/API.md): `ScheduledTask`, `Scheduler`, `ThreadedScheduler`,
+  `Debouncer`, and the tracing hooks.
+- [ARCHITECTURE.md](ARCHITECTURE.md): the wheel, the thread loop, the two runners,
+  and the debouncer's timing model.
+- [AGENTS.md](AGENTS.md): repository map, invariants, and traps.
+- [examples/colored_trace/](examples/colored_trace/README.md): plugging in colored
+  tracing.
 
-### `Scheduler<ScheduledTaskImpl, ThreadPolicyType policy = regular>`
-
-- `Scheduler(std::string name)` — starts the scheduler thread immediately.
-- `add(task)` / `add(task, wakeup_time)` — schedule (`wakeup_time` clamped to not
-  be in the past; the one-arg form expects `task->wakeup_time` already set).
-- `finish(wait = 10) -> bool` / `join(timeout = 60s) -> bool` — stop and wait.
-- runs each due task **inline** on the scheduler thread.
-
-### `ThreadedScheduler<ScheduledTaskImpl, ThreadPolicyType policy = regular>`
-
-Same as `Scheduler` plus a worker pool.
-
-- `ThreadedScheduler(std::string name, const char* format, size_t num_threads)` —
-  `format` is a `std::format` worker-name string (e.g. `"TW{:02}"`).
-- `size()`, `running_size()`, `threadpool_size()`, `threadpool_capacity()` —
-  pool state queries.
-- runs each due task by **dispatching** it to the pool.
-
-### `Debouncer<Key, Func, Tuple, policy>` and factories
-
-Construct via the factories, which deduce `Func`/`Tuple` for you:
-
-- `make_debouncer<Key, policy = regular>(name, format, num_threads, func, throttle_time, debounce_timeout, debounce_busy_timeout, min_force, max_force)` — returns a `Debouncer` by value.
-- `make_unique_debouncer<...>(...)` — same, as `std::unique_ptr`.
-- `make_shared_debouncer<...>(...)` — same, as `std::shared_ptr`.
-
-On a `Debouncer`:
-
-- `debounce(key, args...)` — touch a key; collapses rapid touches into one
-  eventual call to `func(args...)` carrying the last arguments.
-- `delayed_debounce(delay, key, args...)` — same with a fixed extra delay.
-
-The timing model: a fresh key fires after `debounce_timeout`; each subsequent
-touch pushes the call out by `debounce_busy_timeout`, but never past a randomized
-force window `now + random(min_force, max_force)`, so a forever-touched key still
-fires. After firing, an optional `throttle_time` floor (when `> debounce_timeout`)
-keeps the key from firing again too soon.
-
-## Tracing and coloring
-
-`scheduler.h` and `debouncer.h` instrument themselves through four macros that
-are no-ops by default, so the library builds with zero dependency on any logging
-or color header, and tracing has no runtime cost:
-
-- `L_SCHEDULER(...)` — the wheel/scheduler's own trace channel (set to `L_NOTHING`
-  unless already defined).
-- `L_DEBUG_HOOK(label, ...)` — a labelled debug hook.
-- `L_EXC(...)` — logs an exception swallowed in a destructor.
-- `L_CALL(...)` — the debouncer's call-trace channel.
-
-The bundled `scheduler_trace.h` supplies all four as `#ifndef`-guarded no-ops.
-Two ways to plug in real implementations:
-
-1. Point `SCHEDULER_TRACE_HEADER` at a header that defines them; `scheduler.h`
-   includes it instead of `scheduler_trace.h`:
-
-   ```sh
-   c++ -std=c++20 -DSCHEDULER_TRACE_HEADER='"my_trace.h"' ...
-   ```
-
-2. Define the macros before including the library headers.
-
-**About the color identifiers.** `scheduler.h` references nine color constants
-(`BROWN`, `CLEAR_COLOR`, `LIGHT_SKY_BLUE`, `DIM_GREY`, `PURPLE`, `STEEL_BLUE`,
-`DODGER_BLUE`, `LIGHT_GREEN`, `FOREST_GREEN`) **only inside the arguments of
-`L_SCHEDULER(...)` / `L_DEBUG_HOOK(...)`**. In the default build those macros
-expand to nothing, so the preprocessor discards their arguments and the color
-identifiers are never compiled — no color stubs are needed. A trace header that
-turns the macros into real, string-building calls must also define those nine
-identifiers (as `std::string`s that concatenate with `+`). See
-[`examples/colored_trace/`](examples/colored_trace/) for a complete, runnable
-override.
-
-To recover Xapiand's exact behavior, the trace header maps the four macros back
-to Xapiand's `log.h` (`L_SCHEDULER`/`L_CALL`/`L_DEBUG_HOOK`/`L_EXC`) and the nine
-color names to `colors.h`.
-
-## Build & test
+## 🛠️ Building and testing
 
 ```sh
 cmake -B build && cmake --build build && ctest --test-dir build
+./build/scheduler_demo
 ```
 
-The test schedules tasks at future wakeup times and verifies they fire in wakeup
-order on both a `Scheduler` and a `ThreadedScheduler`, that `clear()` cancels a
-task, and that a `Debouncer` collapses a burst of rapid same-key calls into a
-single call carrying the last arguments. It prints `all scheduler tests passed`
-and exits 0. The scheduler is timing-based; the test uses generous windows, not
-tight races.
+The tests are timing-based with generous windows; they also check that a touch
+arriving at the debouncer's force deadline still delivers its value.
 
-## Examples
+## 🤝 Contributing
 
-[`examples/demo.cc`](examples/demo.cc) is a runnable tour of the core engine. A
-top-level CMake build produces it next to the test:
+Issues and pull requests are welcome. Read [AGENTS.md](AGENTS.md) first: it lists
+the invariants a change must keep. CI must pass on every platform.
 
-```sh
-cmake -B build && cmake --build build && ./build/scheduler_demo
-```
+## 📄 License
 
-It schedules three tasks out of insertion order and watches them fire in time
-order on an inline `Scheduler`; cancels a task with `clear()` before it fires and
-shows it skipped; dispatches a batch of due tasks to a `ThreadedScheduler`'s
-worker pool; and hammers a `Debouncer` key with a 30-touch burst to watch it
-coalesce into roughly one delayed call carrying the last value (plus a second key
-that fires once and a third via `delayed_debounce`). Each section prints labelled
-output, including when each task fired relative to when it was scheduled.
-
-[`examples/colored_trace/`](examples/colored_trace/) is a separate, specialized
-example: it injects a `SCHEDULER_TRACE_HEADER` that turns the library's no-op
-trace hooks into colored, `std::format`-rendered output, demonstrating the
-tracing seam described above. See its own `README.md` for the build flags.
-
-## Provenance
-
-Extracted from [Xapiand](https://github.com/Kronuz/Xapiand), where this engine
-underpins the logger's dedicated background thread and every debounced fsync,
-commit, and replication trigger. The standalone delta is pure decoupling:
-Xapiand's `log.h` / `colors.h` macros were replaced by the injectable trace
-header, and the three `random` helpers the debouncer needs were vendored into
-`random.cc`/`random.hh`. The scheduler logic is otherwise identical. See
-[ARCHITECTURE.md](ARCHITECTURE.md) for the design and [AGENTS.md](AGENTS.md) for
-the repo map and invariants.
-
-## License
-
-MIT, Copyright (c) 2015-2019 Dubalu LLC. See [LICENSE](LICENSE).
+MIT, Copyright (c) 2015-2019 Dubalu LLC. See [LICENSE](LICENSE). Extracted from
+[Xapiand](https://github.com/Kronuz/Xapiand), where it drives the logger thread and
+every debounced fsync, commit, and replication trigger.

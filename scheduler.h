@@ -185,12 +185,8 @@ public:
 	void clean() {
 		cctx.op = StashContext::Operation::clean;
 		cctx.begin_key = cctx.atom_first_valid_key.load();
-		// Walk-based clean ("clean as walking"): reclaim up to the walk's live
-		// low-water mark, with no wall-clock margin. The strand fix (atom_ready +
-		// pending_floor) makes first_valid a safe boundary -- a leaf with any
-		// in-flight insert pins it and a late insert lowers it -- so everything
-		// strictly below it has been walked and drained. This replaces the old R1
-		// now-margin cutoff, which reclaimed completed-but-overdue tasks under load.
+		// Reclaims up to the walk's low-water mark, with no wall-clock margin: stash's
+		// sentinel frontier and pending floor make first_valid a safe boundary.
 		cctx.end_key = ctx.atom_first_valid_key.load();
 		TaskType task;
 		queue.next(cctx, &task);
