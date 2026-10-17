@@ -12,12 +12,12 @@ include(FetchContent)
 FetchContent_Declare(
   stash
   GIT_REPOSITORY https://github.com/Kronuz/stash.git
-  GIT_TAG        main  # track tip
+  GIT_TAG        2908b488c10dbd6830c384f53358783639a36965
 )
 FetchContent_Declare(
   threadpool
   GIT_REPOSITORY https://github.com/Kronuz/threadpool.git
-  GIT_TAG        main
+  GIT_TAG        628679a2e27b563cf2709a6f35f98f1657baf7b3
 )
 FetchContent_MakeAvailable(stash threadpool)
 # random_time (the debouncer's force window) comes from the random library; reuse
@@ -26,7 +26,7 @@ if(NOT TARGET random::random)
   FetchContent_Declare(
     random
     GIT_REPOSITORY https://github.com/Kronuz/random.git
-    GIT_TAG        main
+    GIT_TAG        6487253c9e7a4855ccbea36f7a66cea5fef7d381
   )
   FetchContent_MakeAvailable(random)
 endif()
