@@ -6,13 +6,15 @@
 // the key and the arguments) until the walk drains its slot. The bench samples, once
 // a second, the bytes live on the heap, the process RSS, the debouncer tasks alive
 // (one per arguments object), and the calls fired, then stops touching and keeps
-// sampling while the wheel drains. At the end it prints the process CPU time.
+// sampling while the wheel drains. At the end it prints the process CPU time and
+// checks that every touched key fired with its last touch's arguments (each thread
+// owns a disjoint set of keys, so per-key touch order is its program order).
 //
-//   bench_churn [SECONDS] [RATE] [KEYS] [THREADS] [DRAIN_SECONDS]
+//   bench_churn [SECONDS] [RATE] [KEYS] [THREADS] [DRAIN_SECONDS] [DEBOUNCE_MS BUSY_MS FORCE_MS]
 //   bench_churn 30 100000 1000 2 12
 //
-// Timeouts are the committer's defaults (opts.cc): debounce 1 s, busy 3 s, forced
-// within 8 to 10 s, no throttle.
+// Timeouts default to the committer's (opts.cc): debounce 1 s, busy 3 s, forced
+// within 8 to 10 s, no throttle; FORCE_MS sets both ends of the force window.
 
 #include <atomic>
 #include <chrono>
@@ -88,15 +90,18 @@ using namespace std::chrono_literals;
 static std::atomic<long long> g_args{0};
 struct Args {
 	std::weak_ptr<int> shard;
+	int key = 0;
+	long long seq = 0;
 	Args() { g_args.fetch_add(1, std::memory_order_relaxed); }
-	Args(const Args& o) : shard(o.shard) { g_args.fetch_add(1, std::memory_order_relaxed); }
-	Args(Args&& o) noexcept : shard(std::move(o.shard)) { g_args.fetch_add(1, std::memory_order_relaxed); }
+	Args(const Args& o) : shard(o.shard), key(o.key), seq(o.seq) { g_args.fetch_add(1, std::memory_order_relaxed); }
+	Args(Args&& o) noexcept : shard(std::move(o.shard)), key(o.key), seq(o.seq) { g_args.fetch_add(1, std::memory_order_relaxed); }
 	Args& operator=(const Args&) = default;
 	Args& operator=(Args&&) noexcept = default;
 	~Args() { g_args.fetch_sub(1, std::memory_order_relaxed); }
 };
 
 static std::atomic<long long> g_fired{0};
+static std::unique_ptr<std::atomic<long long>[]> g_last_fired;   // per key: highest seq fired
 
 int main(int argc, char** argv) {
 	double seconds = argc > 1 ? atof(argv[1]) : 30.0;
@@ -104,6 +109,10 @@ int main(int argc, char** argv) {
 	int nkeys = argc > 3 ? atoi(argv[3]) : 1000;
 	int nthreads = argc > 4 ? atoi(argv[4]) : 2;
 	double drain = argc > 5 ? atof(argv[5]) : 12.0;
+	auto debounce_ms = std::chrono::milliseconds(argc > 6 ? atol(argv[6]) : 1000);
+	auto busy_ms = std::chrono::milliseconds(argc > 7 ? atol(argv[7]) : 3000);
+	auto force_min = std::chrono::milliseconds(argc > 8 ? atol(argv[8]) : 8000);
+	auto force_max = argc > 8 ? force_min : std::chrono::milliseconds(10000);
 
 	std::vector<std::string> keys;
 	keys.reserve(nkeys);
@@ -113,11 +122,18 @@ int main(int argc, char** argv) {
 		keys.emplace_back(buf);
 	}
 	auto shard = std::make_shared<int>(0);
+	std::vector<long long> last_touched(nkeys, 0);
+	g_last_fired = std::make_unique<std::atomic<long long>[]>(nkeys);
 
 	auto base_live = g_live.load();
 	auto debouncer = make_unique_debouncer<std::string>("CH--", "CH{:02}", 2,
-		[](Args) { g_fired.fetch_add(1, std::memory_order_relaxed); },
-		0ms, 1000ms, 3000ms, 8000ms, 10000ms);
+		[](Args a) {
+			auto& f = g_last_fired[a.key];
+			auto cur = f.load(std::memory_order_relaxed);
+			while (cur < a.seq && !f.compare_exchange_weak(cur, a.seq, std::memory_order_relaxed)) { }
+			g_fired.fetch_add(1, std::memory_order_relaxed);
+		},
+		0ms, debounce_ms, busy_ms, force_min, force_max);
 
 	std::atomic<bool> stop{false};
 	std::atomic<long long> touches{0};
@@ -125,7 +141,9 @@ int main(int argc, char** argv) {
 	for (int t = 0; t < nthreads; ++t) {
 		producers.emplace_back([&, t] {
 			std::mt19937_64 rng(0x9E3779B97F4A7C15ULL ^ (uint64_t)t);
-			std::uniform_int_distribution<int> pick(0, nkeys - 1);
+			int mine = (nkeys - t + nthreads - 1) / nthreads;   // keys t, t + nthreads, ...
+			std::uniform_int_distribution<int> pick(0, mine - 1);
+			long long seq = 0;
 			double per_ms = (double)rate / nthreads / 1000.0;
 			double owed = 0;
 			auto next = std::chrono::steady_clock::now();
@@ -134,7 +152,10 @@ int main(int argc, char** argv) {
 				for (; owed >= 1; owed -= 1) {
 					Args a;
 					a.shard = shard;
-					debouncer->debounce(keys[pick(rng)], std::move(a));
+					a.key = t + pick(rng) * nthreads;
+					a.seq = ++seq;
+					last_touched[a.key] = a.seq;
+					debouncer->debounce(keys[a.key], std::move(a));
 					touches.fetch_add(1, std::memory_order_relaxed);
 				}
 				next += 1ms;
@@ -143,8 +164,9 @@ int main(int argc, char** argv) {
 		});
 	}
 
-	std::printf("bench_churn: %.0fs at %ld touches/s over %d keys (%d threads), then %.0fs drain; committer timeouts 1s/3s/8-10s\n",
-	            seconds, rate, nkeys, nthreads, drain);
+	std::printf("bench_churn: %.0fs at %ld touches/s over %d keys (%d threads), then %.0fs drain; timeouts %lldms/%lldms/%lld-%lldms\n",
+	            seconds, rate, nkeys, nthreads, drain, (long long)debounce_ms.count(), (long long)busy_ms.count(),
+	            (long long)force_min.count(), (long long)force_max.count());
 	std::printf("     t |   touches/s |  fired/s |  args alive |  heap MB |   RSS MB\n");
 	auto t0 = std::chrono::steady_clock::now();
 	long long last_touches = 0, last_fired = 0;
@@ -175,5 +197,10 @@ int main(int argc, char** argv) {
 	std::printf("peak: args alive %lld, heap %.1f MB, RSS %.1f MB; touches %lld, fired %lld; CPU %.2f s\n",
 	            peak_args, peak_live / 1048576.0, peak_rss / 1048576.0, touches.load(), g_fired.load(), cpu);
 	debouncer.reset();
-	return 0;
+	int stale = 0;
+	for (int k = 0; k < nkeys; ++k) {
+		stale += g_last_fired[k].load() != last_touched[k];
+	}
+	std::printf("keys whose last touch never fired: %d\n", stale);
+	return stale ? 1 : 0;
 }
