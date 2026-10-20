@@ -53,4 +53,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # A runnable tour of the library (not a test): build & run ./build/scheduler_demo
   add_executable(scheduler_demo examples/demo.cc)
   target_link_libraries(scheduler_demo PRIVATE scheduler)
+
+  # Cancel churn on a debouncer (manual benchmark, not a test).
+  add_executable(scheduler_bench_churn bench/bench_churn.cc)
+  target_link_libraries(scheduler_bench_churn PRIVATE scheduler)
 endif()

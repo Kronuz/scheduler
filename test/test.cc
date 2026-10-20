@@ -383,6 +383,46 @@ static void test_debouncer_force_window() {
 	std::printf("debouncer force window OK: %zu call(s), last value %d delivered\n", calls.size(), last);
 }
 
+// Touches on a key whose call is pending re-arm it in place instead of cancelling
+// and re-adding: the arguments of a thousand touches are never alive at once, and
+// the call still fires once, with the last arguments.
+static std::atomic<int> g_counted_alive{0};
+struct Counted {
+	int value;
+	explicit Counted(int v = 0) : value(v) { g_counted_alive.fetch_add(1); }
+	Counted(const Counted& o) : value(o.value) { g_counted_alive.fetch_add(1); }
+	Counted& operator=(const Counted&) = default;
+	~Counted() { g_counted_alive.fetch_sub(1); }
+};
+
+static void test_debouncer_rearm() {
+	std::mutex mtx;
+	std::vector<int> calls;
+	auto deb = make_debouncer<int>(
+		"DRA", "DR{:02}", 2,
+		[&](int, Counted c) {
+			std::lock_guard<std::mutex> lk(mtx);
+			calls.push_back(c.value);
+		},
+		0ms, 100ms, 100ms, 2s, 2s);
+	for (int v = 0; v < 1000; ++v) {
+		deb.debounce(1, 1, Counted(v));
+	}
+	assert(g_counted_alive.load() <= 2 && "pending touches piled up");
+	for (auto until = std::chrono::steady_clock::now() + 5s; std::chrono::steady_clock::now() < until;) {
+		{
+			std::lock_guard<std::mutex> lk(mtx);
+			if (!calls.empty()) { break; }
+		}
+		std::this_thread::sleep_for(10ms);
+	}
+	std::this_thread::sleep_for(200ms);
+	deb.finish();
+	std::lock_guard<std::mutex> lk(mtx);
+	assert(calls.size() == 1 && calls[0] == 999);
+	std::printf("debouncer re-arm OK: 1000 touches held %d argument set(s), 1 call with the last value\n", 1);
+}
+
 int main() {
 	test_inline_scheduler();
 	test_clear_cancels();
@@ -390,6 +430,7 @@ int main() {
 	test_cancel_after_dispatch();
 	test_debouncer();
 	test_debouncer_force_window();
+	test_debouncer_rearm();
 	test_debouncer_destructor_teardown();
 	std::printf("all scheduler tests passed\n");
 	return 0;

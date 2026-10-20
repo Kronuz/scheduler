@@ -26,6 +26,7 @@
 #include <chrono>                            // for std::chrono
 #include <memory>                            // for std::shared_ptr, std::make_shared
 #include <mutex>                             // for std::mutex
+#include <optional>                          // for std::optional
 #include <string>                            // for std::string
 #include <tuple>                             // for std::make_tuple, std::apply
 #include <unordered_map>                     // for std::unordered_map
@@ -46,9 +47,14 @@ template <typename Key, typename Func, typename Tuple, ThreadPolicyType thread_p
 class Debouncer : public ThreadedScheduler<DebouncerTask<Key, Func, Tuple, thread_policy>> {
 	friend DebouncerTask<Key, Func, Tuple, thread_policy>;
 
+	// One pending task per key. A touch while it is pending only moves `target`
+	// later and replaces `args`; the task re-adds itself when it fires before
+	// `target`, so cancelled tasks never pile up in the wheel.
 	struct Status {
 		std::shared_ptr<DebouncerTask<Key, Func, Tuple, thread_policy>> task;
 		std::chrono::steady_clock::time_point max_wakeup_time;
+		std::chrono::steady_clock::time_point target;
+		std::optional<Tuple> args;
 	};
 
 	std::mutex statuses_mtx;
@@ -61,8 +67,8 @@ class Debouncer : public ThreadedScheduler<DebouncerTask<Key, Func, Tuple, threa
 	std::chrono::milliseconds debounce_min_force_timeout;
 	std::chrono::milliseconds debounce_max_force_timeout;
 
-	void release(const Key& key);
-	void throttle(const Key& key);
+	void release(const Key& key, const DebouncerTask<Key, Func, Tuple, thread_policy>* throttler);
+	std::shared_ptr<DebouncerTask<Key, Func, Tuple, thread_policy>> throttle_locked(typename std::unordered_map<Key, Status>::iterator it);
 
 public:
 	Debouncer(std::string name, const char* format, size_t num_threads, Func func, std::chrono::milliseconds throttle_time, std::chrono::milliseconds debounce_timeout, std::chrono::milliseconds debounce_busy_timeout, std::chrono::milliseconds debounce_min_force_timeout, std::chrono::milliseconds debounce_max_force_timeout) :
@@ -118,11 +124,9 @@ class DebouncerTask : public ScheduledTask<ThreadedScheduler<DebouncerTask<Key, 
 	bool throttler;
 
 	Key key;
-	Tuple args;
 
 public:
-	DebouncerTask(Debouncer<Key, Func, Tuple, thread_policy>& debouncer, const Key& key);
-	DebouncerTask(Debouncer<Key, Func, Tuple, thread_policy>& debouncer, const Key& key, Tuple args);
+	DebouncerTask(Debouncer<Key, Func, Tuple, thread_policy>& debouncer, const Key& key, bool throttler);
 
 	void operator()();
 };
@@ -130,21 +134,10 @@ public:
 
 template <typename Key, typename Func, typename Tuple, ThreadPolicyType thread_policy>
 inline
-DebouncerTask<Key, Func, Tuple, thread_policy>::DebouncerTask(Debouncer<Key, Func, Tuple, thread_policy>& debouncer, const Key& key, Tuple args) :
+DebouncerTask<Key, Func, Tuple, thread_policy>::DebouncerTask(Debouncer<Key, Func, Tuple, thread_policy>& debouncer, const Key& key, bool throttler) :
 	debouncer(debouncer),
-	throttler(false),
-	key(std::move(key)),
-	args(std::move(args))
-{
-}
-
-
-template <typename Key, typename Func, typename Tuple, ThreadPolicyType thread_policy>
-inline
-DebouncerTask<Key, Func, Tuple, thread_policy>::DebouncerTask(Debouncer<Key, Func, Tuple, thread_policy>& debouncer, const Key& key) :
-	debouncer(debouncer),
-	throttler(true),
-	key(std::move(key))
+	throttler(throttler),
+	key(key)
 {
 }
 
@@ -157,57 +150,70 @@ DebouncerTask<Key, Func, Tuple, thread_policy>::operator()()
 	L_DEBUG_HOOK("DebouncerTask::operator()", "DebouncerTask::operator()()");
 
 	if (throttler) {
-		debouncer.release(key);
-	} else {
-		debouncer.throttle(key);
-		std::apply(debouncer.func, args);
+		debouncer.release(key, this);
+		return;
+	}
+
+	std::shared_ptr<DebouncerTask<Key, Func, Tuple, thread_policy>> next;
+	std::optional<Tuple> args;
+	{
+		std::lock_guard<std::mutex> statuses_lk(debouncer.statuses_mtx);
+		auto it = debouncer.statuses.find(key);
+		if (it == debouncer.statuses.end() || it->second.task.get() != this) {
+			return;  // superseded
+		}
+		auto& status = it->second;
+		if (status.target > this->wakeup_time) {
+			// Touched since it was armed: re-arm at the latest target, same arguments.
+			next = std::make_shared<DebouncerTask<Key, Func, Tuple, thread_policy>>(debouncer, key, false);
+			next->wakeup_time = status.target;
+			status.task = next;
+		} else {
+			// Due: take the arguments and release or throttle the key in the same
+			// critical section, so a touch from here on starts a new call.
+			args = std::move(status.args);
+			next = debouncer.throttle_locked(it);
+		}
+	}
+	if (next) {
+		debouncer.add(next);
+	}
+	if (args) {
+		std::apply(debouncer.func, std::move(*args));
 	}
 }
 
 
 template <typename Key, typename Func, typename Tuple, ThreadPolicyType thread_policy>
 inline void
-Debouncer<Key, Func, Tuple, thread_policy>::release(const Key& key)
+Debouncer<Key, Func, Tuple, thread_policy>::release(const Key& key, const DebouncerTask<Key, Func, Tuple, thread_policy>* throttler)
 {
 	std::lock_guard<std::mutex> statuses_lk(statuses_mtx);
-	statuses.erase(key);
+	auto it = statuses.find(key);
+	// Only the throttler still in charge releases; a touch may have replaced it.
+	if (it != statuses.end() && it->second.task.get() == throttler) {
+		statuses.erase(it);
+	}
 }
 
 
+// With statuses_mtx held, after a call fired: drop the key, or turn it into a
+// throttler and return the throttler task for the caller to add.
 template <typename Key, typename Func, typename Tuple, ThreadPolicyType thread_policy>
-inline void
-Debouncer<Key, Func, Tuple, thread_policy>::throttle(const Key& key)
+inline std::shared_ptr<DebouncerTask<Key, Func, Tuple, thread_policy>>
+Debouncer<Key, Func, Tuple, thread_policy>::throttle_locked(typename std::unordered_map<Key, Status>::iterator it)
 {
 	if (throttle_time <= debounce_timeout) {
-		// No throttler, just release:
-		release(key);
-	} else {
-		// Throttling, configure:
-		std::shared_ptr<DebouncerTask<Key, Func, Tuple, thread_policy>> task;
-
-		{
-			auto now = std::chrono::steady_clock::now();
-
-			std::lock_guard<std::mutex> statuses_lk(statuses_mtx);
-			auto it = statuses.find(key);
-			if (it == statuses.end()) {
-				return;
-			}
-
-			auto status = &(it->second);
-
-			status->max_wakeup_time = std::chrono::steady_clock::time_point::min();  // flag status as throttler
-
-			if (status->task) {
-				status->task->clear();
-			}
-			task = std::make_shared<DebouncerTask<Key, Func, Tuple, thread_policy>>(*this, key);
-			task->wakeup_time = now + throttle_time;
-			status->task = task;
-		}
-
-		this->add(task);
+		statuses.erase(it);
+		return nullptr;
 	}
+	auto& status = it->second;
+	status.max_wakeup_time = std::chrono::steady_clock::time_point::min();  // flag status as throttler
+	auto task = std::make_shared<DebouncerTask<Key, Func, Tuple, thread_policy>>(*this, it->first, true);
+	task->wakeup_time = std::chrono::steady_clock::now() + throttle_time;
+	status.task = task;
+	status.target = task->wakeup_time;
+	return task;
 }
 
 
@@ -265,15 +271,23 @@ Debouncer<Key, Func, Tuple, thread_policy>::delayed_debounce(std::chrono::millis
 		}
 
 		if (status->task) {
-			// Never fire earlier than the pending task; it is replaced so the latest arguments win.
-			if (next_wakeup_time < status->task->wakeup_time) {
-				next_wakeup_time = status->task->wakeup_time;
+			// Never fire earlier than the pending task or target; the latest arguments win.
+			if (next_wakeup_time < status->target) {
+				next_wakeup_time = status->target;
+			}
+			if (!status->task->throttler) {
+				// A call is pending: move its target, and it re-arms itself.
+				status->target = next_wakeup_time;
+				status->args.emplace(std::forward<Args>(args)...);
+				return;
 			}
 			status->task->clear();
 		}
-		task = std::make_shared<DebouncerTask<Key, Func, Tuple, thread_policy>>(*this, key, std::make_tuple(std::forward<Args>(args)...));
+		task = std::make_shared<DebouncerTask<Key, Func, Tuple, thread_policy>>(*this, key, false);
 		task->wakeup_time = next_wakeup_time;
 		status->task = task;
+		status->target = next_wakeup_time;
+		status->args.emplace(std::forward<Args>(args)...);
 	}
 
 	this->add(task);
