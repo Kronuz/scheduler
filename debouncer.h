@@ -190,7 +190,7 @@ DebouncerTask<Key, Func, Tuple, thread_policy>::operator()()
 		// Refused (shutting down, or out of memory). A re-arm has no caller to
 		// tell: run the call now, a little early, and release the key as a fire
 		// does. A refused throttler just releases the key.
-		std::shared_ptr<DebouncerTask<Key, Func, Tuple, thread_policy>> throttler;
+		std::shared_ptr<DebouncerTask<Key, Func, Tuple, thread_policy>> throttle;
 		{
 			std::lock_guard<std::mutex> statuses_lk(debouncer.statuses_mtx);
 			auto it = debouncer.statuses.find(key);
@@ -199,12 +199,12 @@ DebouncerTask<Key, Func, Tuple, thread_policy>::operator()()
 					debouncer.statuses.erase(it);
 				} else {
 					args = std::move(it->second.args);
-					throttler = debouncer.throttle_locked(it);
+					throttle = debouncer.throttle_locked(it);
 				}
 			}
 		}
-		if (throttler && debouncer.add(throttler) != schedule_result::scheduled) {
-			debouncer.release(key, throttler.get());
+		if (throttle && debouncer.add(throttle) != schedule_result::scheduled) {
+			debouncer.release(key, throttle.get());
 		}
 	}
 	if (args) {
@@ -281,6 +281,8 @@ Debouncer<Key, Func, Tuple, thread_policy>::delayed_debounce(std::chrono::millis
 			auto& status_ref = statuses[key] = {
 				nullptr,
 				now + random_time(debounce_min_force_timeout, debounce_max_force_timeout) + delay,
+				{},
+				{},
 			};
 			status = &status_ref;
 			fresh = true;
