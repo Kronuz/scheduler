@@ -1,6 +1,7 @@
 // no_memory: allocation failure inside the wheel or a debouncer touch is reported,
 // not thrown, and leaves nothing pending. It replaces global operator new to fail
-// on demand, which the sanitizer runtimes also define, so CMake skips it there.
+// on demand; TSan's static runtime defines it too and the link clashes, so CMake
+// skips this test in TSan builds (it runs under ASan+UBSan).
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -17,9 +18,15 @@ using namespace std::chrono_literals;
 
 // Fails every allocation on this thread while set.
 static thread_local bool t_fail = false;
+// Fails the next allocation of exactly this many bytes, on any thread; 0 = off.
+static std::atomic<std::size_t> g_fail_size{0};
 
 static void* allocate(std::size_t n) {
 	if (t_fail) {
+		throw std::bad_alloc();
+	}
+	if (auto size = g_fail_size.load(std::memory_order_relaxed); size == n &&
+	    g_fail_size.compare_exchange_strong(size, 0)) {
 		throw std::bad_alloc();
 	}
 	if (auto p = std::malloc(n ? n : 1)) {
@@ -119,6 +126,40 @@ int main() {
 		deb.finish();
 		std::lock_guard<std::mutex> lk(mtx);
 		CHECK(calls.size() == 1 && calls[0] == first);
+	}
+
+	// A re-arm refused for lack of memory in the fire path (on a worker, with no
+	// caller to tell) runs the call now, once, with the latest arguments, instead
+	// of at its target, and releases the key.
+	{
+		std::mutex mtx;
+		std::vector<int> calls;
+		auto deb = make_debouncer<int>(
+			"NMF", "NF{:02}", 1,
+			[&](int, int value) {
+				std::lock_guard<std::mutex> lk(mtx);
+				calls.push_back(value);
+			},
+			0ms, 50ms, 400ms, 1s, 1s);
+		auto start = std::chrono::steady_clock::now();
+		CHECK(deb.debounce(1, 1, 10) == schedule_result::scheduled);   // fires at ~50 ms
+		CHECK(deb.debounce(1, 1, 11) == schedule_result::scheduled);   // target ~400 ms
+		g_fail_size = sizeof(std::shared_ptr<int>);                       // the re-arm's value box
+		for (auto until = start + 5s; std::chrono::steady_clock::now() < until;) {
+			{
+				std::lock_guard<std::mutex> lk(mtx);
+				if (!calls.empty()) { break; }
+			}
+			std::this_thread::sleep_for(5ms);
+		}
+		auto elapsed = std::chrono::steady_clock::now() - start;
+		std::this_thread::sleep_for(100ms);
+		CHECK(g_fail_size.load() == 0);   // the re-arm hit the injected failure
+		CHECK(deb.pending_keys() == 0);
+		deb.finish();
+		std::lock_guard<std::mutex> lk(mtx);
+		CHECK(calls.size() == 1 && calls[0] == 11);
+		CHECK(elapsed < 350ms);           // ran at the early fire, not at the target
 	}
 
 	std::printf("no_memory OK: add and debounce report it and leave nothing pending\n");

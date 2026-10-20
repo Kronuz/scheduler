@@ -84,9 +84,10 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   `schedule_result::past_horizon` and catches `std::bad_alloc` as `no_memory`;
   every `add` and `debounce` is `noexcept`, so keep those catches.
 - **A refused debounce leaves nothing pending.** A touch adds its task under the
-  status mutex and erases the key's status on any refusal; a fire-path re-arm
-  that is refused runs the call on the fire thread and releases the key. No
-  `Status` may keep a task that is not on the wheel.
+  status mutex and erases the key's status on any refusal. A fire-path re-arm
+  refused as `stopping` or `no_memory` runs the call on the fire thread; one
+  refused as `past_horizon` drops it (never run a day early). Either way the key
+  is released. No `Status` may keep a task that is not on the wheel.
 - **`ScheduledTask::clear()` is a single CAS on `atom_cleared_at`.** First caller
   wins (returns true), the rest lose. The whole cancellation story (and the
   debouncer's per-key collapse) depends on this being atomic and one-shot. Don't

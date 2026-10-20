@@ -459,9 +459,9 @@ static void test_debouncer_rearm() {
 }
 
 // debounce() reports the scheduler's result, and a refused touch leaves nothing
-// pending. A re-arm refused in the fire path (no caller to tell) runs the call
-// once, a little early, and releases the key. Force timeouts of 48 h let a touch
-// move a pending call past the wheel's 24 h horizon.
+// pending. A re-arm refused past the horizon in the fire path drops the call and
+// releases the key: it was never meant to run a day early. Force timeouts of
+// 48 h let a touch move a pending call past the wheel's 24 h horizon.
 static void test_debouncer_refusals() {
 	std::mutex mtx;
 	std::vector<int> calls;
@@ -482,19 +482,16 @@ static void test_debouncer_refusals() {
 	assert(result == schedule_result::scheduled);
 	result = deb.delayed_debounce(25h, 2, 2, 11);   // moves the pending call's target past 24 h
 	assert(result == schedule_result::scheduled);
-	for (auto until = std::chrono::steady_clock::now() + 5s; std::chrono::steady_clock::now() < until;) {
-		{
-			std::lock_guard<std::mutex> lk(mtx);
-			if (!calls.empty()) { break; }
-		}
+	// The task fires at ~50 ms, tries to re-arm 25 h out, and is refused.
+	for (auto until = std::chrono::steady_clock::now() + 5s; deb.pending_keys() != 0 && std::chrono::steady_clock::now() < until;) {
 		std::this_thread::sleep_for(10ms);
 	}
 	std::this_thread::sleep_for(100ms);
 	{
 		std::lock_guard<std::mutex> lk(mtx);
-		assert(calls.size() == 1 && calls[0] == 11 && "refused re-arm did not run the call once");
+		assert(calls.empty() && "a re-arm refused past the horizon ran the call");
 	}
-	assert(deb.pending_keys() == 0 && "refused re-arm left the key pending");
+	assert(deb.pending_keys() == 0 && "a re-arm refused past the horizon left the key pending");
 
 	deb.finish();
 	result = deb.debounce(3, 3, 30);
@@ -502,9 +499,9 @@ static void test_debouncer_refusals() {
 	assert(deb.pending_keys() == 0 && "a touch refused at shutdown left the key pending");
 	std::this_thread::sleep_for(100ms);
 	std::lock_guard<std::mutex> lk(mtx);
-	assert(calls.size() == 1);
+	assert(calls.empty() && "a refused touch or past-horizon re-arm ran a call");
 	(void)result;
-	std::printf("debouncer refusals OK: past_horizon and stopping leave nothing pending; a refused re-arm ran once\n");
+	std::printf("debouncer refusals OK: past_horizon and stopping leave nothing pending; a past-horizon re-arm ran nothing\n");
 }
 
 int main() {

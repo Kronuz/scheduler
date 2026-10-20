@@ -46,7 +46,10 @@ On a `Debouncer`:
   collapses rapid touches into one eventual call to `func(args...)` carrying the
   last arguments. `scheduled` when a call for the key is pending; otherwise the
   scheduler's refusal, and no task is left pending for the key, so a caller that
-  must not lose the call runs it itself. `no_memory` also covers a failed copy of
+  must not lose the call runs it itself on `stopping` or `no_memory`.
+  `past_horizon` means a delay longer than the wheel's 24 h: a caller's error,
+  never a reason to run the call early. A pending call that re-arms past the
+  horizon is dropped (reported through `L_DEBUG_HOOK`). `no_memory` also covers a failed copy of
   the arguments (an earlier pending call is then kept).
 - `delayed_debounce(delay, key, args...) -> schedule_result` — same with a fixed
   extra delay.

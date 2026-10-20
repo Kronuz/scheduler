@@ -12,7 +12,7 @@ include(FetchContent)
 FetchContent_Declare(
   stash
   GIT_REPOSITORY https://github.com/Kronuz/stash.git
-  GIT_TAG        d234d242e9c2c624cda29ebf33c415f50cef8f37
+  GIT_TAG        e3599782a134309d46c5d654349278b16cb9273d
 )
 FetchContent_Declare(
   threadpool
@@ -51,8 +51,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_test(NAME scheduler COMMAND scheduler_test)
 
   # Allocation failure (no_memory). It replaces global operator new and delete,
-  # which the sanitizer runtimes also define, so sanitized builds skip it.
-  if(NOT CMAKE_CXX_FLAGS MATCHES "sanitize")
+  # which TSan's static runtime also defines (a link clash), so TSan builds skip
+  # it; CI passes TSan through the per-config and linker flags.
+  string(TOUPPER "${CMAKE_BUILD_TYPE}" SCHEDULER_BUILD_TYPE)
+  set(SCHEDULER_ALL_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${SCHEDULER_BUILD_TYPE}} ${CMAKE_EXE_LINKER_FLAGS}")
+  if(NOT SCHEDULER_ALL_FLAGS MATCHES "-fsanitize=thread")
     add_executable(scheduler_no_memory_test test/no_memory.cc)
     target_link_libraries(scheduler_no_memory_test PRIVATE scheduler)
     add_test(NAME scheduler_no_memory COMMAND scheduler_no_memory_test)

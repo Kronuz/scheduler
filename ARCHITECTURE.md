@@ -156,9 +156,12 @@ status mutex, so a later touch that finds the task pending knows it is on the
 wheel; if the add is refused, the key's status is erased and nothing stays
 pending. A touch on a pending call returns `scheduled` without adding; if copying
 its arguments fails it returns `no_memory` and the pending call keeps its earlier
-arguments. A re-arm refused in the fire path has no caller to tell, so the task
-runs the call there and then, a little early, and releases or throttles the key
-as a fire does; a refused throttler just releases it. Releasing or throttling:
+arguments. A re-arm refused in the fire path has no caller to tell. On
+`stopping` or `no_memory` the task runs the call there and then, a little early,
+and releases or throttles the key as a fire does. On `past_horizon` (a delay
+longer than the wheel allows, never meant to run a day early) it drops the call,
+releases the key, and reports it through `L_DEBUG_HOOK("Debouncer::PAST_HORIZON",
+...)`. A refused throttler just releases the key. Releasing or throttling:
 
 - If `throttle_time <= debounce_timeout`, just `release(key)` (erase the status),
   so the next touch starts fresh.

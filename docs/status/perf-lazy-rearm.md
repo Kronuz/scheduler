@@ -15,16 +15,19 @@ Done, ready for review with the past-horizon follow-up; not merged. Results in
 - Owner's follow-up, no silent drops (f92ba00 tried `try_add` and a `dropped()` count; eca6062 a
   `bool`; the owner settled on an enum): every `add` overload and `debounce` / `delayed_debounce`
   are `noexcept` and return `schedule_result { scheduled, past_horizon, stopping, no_memory }`,
-  not `[[nodiscard]]`. stash's `add` stays `bool` (pinned to stash `perf/window-epoch` d234d24
+  not `[[nodiscard]]`. stash's `add` stays `bool` (pinned to stash `perf/window-epoch` e359978
   until it lands); the scheduler maps false to `past_horizon` and `std::bad_alloc` to
   `no_memory`. A refused touch erases the key's status (the add runs under the status mutex, so a
   later touch on a pending call knows it is on the wheel); a refused fire-path re-arm runs the
-  call on the fire thread and releases the key. The queue's `walk`, `peep`, `clean` and
+  call on the fire thread and releases the key. Owner's refinement (past_horizon is an error,
+  never run now): a fire-path re-arm refused as `past_horizon` drops the call, releases the key
+  and reports through `L_DEBUG_HOOK`; `stopping` and `no_memory` still run it now. The queue's `walk`, `peep`, `clean` and
   `clean_checkpoint` are `noexcept`. `pending_keys()` added.
 - Tests: `test_add_result` (scheduled, past_horizon, stopping), `test_debouncer_refusals`
-  (past_horizon and stopping touches leave nothing pending; a refused re-arm runs once, with the
-  last arguments), `test/no_memory.cc` (no_memory from `add` and `debounce`, nothing pending, a
-  pending call keeps its arguments; a separate executable because it replaces `operator new`,
+  (past_horizon and stopping touches leave nothing pending; a re-arm refused past the horizon
+  runs nothing and releases the key), `test/no_memory.cc` (no_memory from `add` and `debounce`,
+  nothing pending, a pending call keeps its arguments; a re-arm refused for memory runs the call
+  once, early, with the last arguments; a separate executable because it replaces `operator new`,
   skipped in sanitized builds). Each fails with its fix reverted. TSan and ASan+UBSan, 3 runs.
 - Downstream: Xapiand's scheduler, debouncer and logger TUs (manager, handler, discovery, shard,
   wal, pool, main, logger.cc) compile against this branch, stash d234d24 and the logger branch
@@ -36,6 +39,12 @@ Done, ready for review with the past-horizon follow-up; not merged. Results in
 1. Code review of the debouncer change (the fire/re-arm critical section, the throttler release)
    and of the `bool` `add`.
 2. If it lands: bump Xapiand's scheduler pin; consider the throttle path under churn.
+
+- CI fix: `scheduler_no_memory_test` replaces global `operator new`, which TSan's static runtime
+  also defines; CMake now skips it only when the C++ or linker flags (any config) carry
+  `-fsanitize=thread` (CI passes TSan through `CMAKE_CXX_FLAGS_RELWITHDEBINFO`), so it still
+  runs under ASan+UBSan. Checked with CI-shaped TSan and ASan configs locally.
+- stash repinned to e359978 (DW11: no hole after a failed allocation).
 
 ## Blocked on
 

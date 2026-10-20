@@ -186,22 +186,30 @@ DebouncerTask<Key, Func, Tuple, thread_policy>::operator()()
 			next = debouncer.throttle_locked(it);
 		}
 	}
-	if (next && debouncer.add(next) != schedule_result::scheduled) {
-		// Refused (shutting down, or out of memory). A re-arm has no caller to
-		// tell: run the call now, a little early, and release the key as a fire
-		// does. A refused throttler just releases the key.
+	auto result = next ? debouncer.add(next) : schedule_result::scheduled;
+	if (result != schedule_result::scheduled) {
+		// Refused. A re-arm has no caller to tell: on stopping or no_memory run the
+		// call now, a little early, and release or throttle the key as a fire
+		// does. past_horizon is a delay longer than the wheel allows, never meant
+		// to run a day early: drop the call and release the key. A refused
+		// throttler just releases the key.
 		std::shared_ptr<DebouncerTask<Key, Func, Tuple, thread_policy>> throttle;
+		bool dropped = false;
 		{
 			std::lock_guard<std::mutex> statuses_lk(debouncer.statuses_mtx);
 			auto it = debouncer.statuses.find(key);
 			if (it != debouncer.statuses.end() && it->second.task == next) {
-				if (next->throttler) {
+				if (next->throttler || result == schedule_result::past_horizon) {
+					dropped = !next->throttler;
 					debouncer.statuses.erase(it);
 				} else {
 					args = std::move(it->second.args);
 					throttle = debouncer.throttle_locked(it);
 				}
 			}
+		}
+		if (dropped) {
+			L_DEBUG_HOOK("Debouncer::PAST_HORIZON", "Debouncer::" + BROWN + "debounced call dropped (re-armed past the ~24h wheel horizon)" + CLEAR_COLOR);
 		}
 		if (throttle && debouncer.add(throttle) != schedule_result::scheduled) {
 			debouncer.release(key, throttle.get());
