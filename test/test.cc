@@ -108,6 +108,40 @@ static void test_clear_cancels() {
 
 
 // ---------------------------------------------------------------------------
+// 1c. Scheduler: a task past the 24 h horizon is refused and counted, not lost
+// silently: try_add() returns false, add() drops it, and both count it.
+// ---------------------------------------------------------------------------
+
+static void test_past_horizon() {
+	g_inline_ran.store(0);
+	InlineSched sched("SCHED3");
+
+	auto now = std::chrono::steady_clock::now();
+	assert(sched.dropped() == 0);
+	bool added = sched.try_add(std::make_shared<OrderTask>(-1), now + 48h);
+	assert(!added && "past-horizon try_add accepted");
+	assert(sched.dropped() == 1 && "past-horizon try_add not counted");
+	sched.add(std::make_shared<OrderTask>(-2), now + 48h);
+	assert(sched.dropped() == 2 && "past-horizon add not counted");
+
+	added = sched.try_add(std::make_shared<OrderTask>(7), now + 50ms);
+	assert(added);
+	for (int i = 0; i < 100 && g_inline_ran.load() < 1; ++i) {
+		std::this_thread::sleep_for(20ms);
+	}
+	sched.finish();
+	assert(g_inline_ran.load() == 1);
+
+	// After finish() a task is refused too, but it is a shutdown, not a drop.
+	added = sched.try_add(std::make_shared<OrderTask>(-3), std::chrono::steady_clock::now() + 50ms);
+	assert(!added);
+	assert(sched.dropped() == 2);
+	(void)added;
+	std::printf("scheduler OK: past-horizon tasks refused and counted (%llu dropped)\n", sched.dropped());
+}
+
+
+// ---------------------------------------------------------------------------
 // 2. ThreadedScheduler: tasks dispatched to a worker pool.
 // ---------------------------------------------------------------------------
 
@@ -426,6 +460,7 @@ static void test_debouncer_rearm() {
 int main() {
 	test_inline_scheduler();
 	test_clear_cancels();
+	test_past_horizon();
 	test_threaded_scheduler();
 	test_cancel_after_dispatch();
 	test_debouncer();

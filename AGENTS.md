@@ -80,8 +80,9 @@ and exposes the source dir as a `PUBLIC` include. The test target is
 - **`SchedulerQueue`'s wheel geometry is exactly 24 h at 1 ms granularity.** The
   four `StashSlots` levels (`50×1ms`, `10×50ms`, `36×500ms`, `4800×18s`) multiply
   to 86 400 s. Changing a `Div`/`Mod`/`Size` changes the horizon or resolution
-  and the overflow point. The `add()` path catches `std::out_of_range` ("stash
-  overflow") for tasks scheduled past the horizon — keep that catch.
+  and the overflow point. `try_add()` catches `std::out_of_range` ("stash
+  overflow") for tasks scheduled past the horizon, counts them in `dropped()`,
+  and returns false; `add()` calls it and ignores the result. Keep that catch.
 - **`ScheduledTask::clear()` is a single CAS on `atom_cleared_at`.** First caller
   wins (returns true), the rest lose. The whole cancellation story (and the
   debouncer's per-key collapse) depends on this being atomic and one-shot. Don't

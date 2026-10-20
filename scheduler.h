@@ -149,6 +149,7 @@ private:
 	StashContext ctx;
 	StashContext cctx;
 	_4800_18s queue;
+	std::atomic_ullong atom_dropped{0};
 
 public:
 	SchedulerQueue() :
@@ -192,22 +193,28 @@ public:
 		queue.next(cctx, &task);
 	}
 
-	void add(const TaskType& task, std::chrono::steady_clock::time_point time_point) {
+	// False, and counted in dropped(), when the wheel refuses a task past its
+	// horizon (~24 h from the walk's low-water mark); the task never fires.
+	bool try_add(const TaskType& task, std::chrono::steady_clock::time_point time_point) {
 		try {
 			queue.add(ctx, std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count(), task);
+			return true;
 		} catch (const std::out_of_range&) {
-			// SILENT-DROP WARNING: the task is scheduled beyond the wheel's horizon
-			// (~24h, the span of the outermost StashSlots ring) and is being
-			// DISCARDED here. add() returns void and is on the hot path with many
-			// call sites (BaseScheduler::add, Debouncer), so widening it to report
-			// failure would be an API break that ripples through all of them; we
-			// keep the signature and instead surface the drop through the injectable
-			// trace hooks. Consumers that care should override L_DEBUG_HOOK (or the
-			// SCHEDULER_TRACE_HEADER) to make this audible — by default it is a
-			// no-op. The task's callback will simply never fire.
+			atom_dropped.fetch_add(1, std::memory_order_relaxed);
 			L_DEBUG_HOOK("BaseScheduler::OVERFLOW", "BaseScheduler::" + BROWN + "Stash overflow! task dropped (scheduled past the ~24h wheel horizon)" + CLEAR_COLOR);
 			L_SCHEDULER("BaseScheduler::" + BROWN + "Stash overflow!" + CLEAR_COLOR + "\n");
+			return false;
 		}
+	}
+
+	// Drops a refused task; dropped() still counts it.
+	void add(const TaskType& task, std::chrono::steady_clock::time_point time_point) {
+		try_add(task, time_point);
+	}
+
+	// Tasks refused past the horizon since construction (monotonic, any thread).
+	unsigned long long dropped() const noexcept {
+		return atom_dropped.load(std::memory_order_relaxed);
 	}
 };
 
@@ -311,12 +318,16 @@ public:
 		}
 	}
 
-	void add(const TaskType& task) {
+	// False when the task was not scheduled: past the wheel's horizon (counted
+	// in dropped()) or after finish() began. add() drops it the same way.
+	bool try_add(const TaskType& task) {
 		if (ending < 0) {
 			auto wakeup_time = task->wakeup_time;
 			assert(wakeup_time > std::chrono::steady_clock::time_point{});
 
-			scheduler_queue.add(task, wakeup_time);
+			if (!scheduler_queue.try_add(task, wakeup_time)) {
+				return false;
+			}
 
 			auto next_wakeup_time = atom_next_wakeup_time.load();
 			while (next_wakeup_time > wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(next_wakeup_time, wakeup_time)) { }
@@ -329,16 +340,31 @@ public:
 			} else {
 				L_SCHEDULER("BaseScheduler::" + FOREST_GREEN + "ADDED" + CLEAR_COLOR + " - now:{}, next_wakeup_time:{}, wakeup_time:{}", now, atom_next_wakeup_time.load(), wakeup_time);
 			}
+			return true;
 		}
+		return false;
 	}
 
-	void add(const TaskType& task, std::chrono::steady_clock::time_point wakeup_time) {
+	bool try_add(const TaskType& task, std::chrono::steady_clock::time_point wakeup_time) {
 		auto now = std::chrono::steady_clock::now();
 		if (wakeup_time < now) {
 			wakeup_time = now;
 		}
 		task->wakeup_time = wakeup_time;
-		add(task);
+		return try_add(task);
+	}
+
+	void add(const TaskType& task) {
+		try_add(task);
+	}
+
+	void add(const TaskType& task, std::chrono::steady_clock::time_point wakeup_time) {
+		try_add(task, wakeup_time);
+	}
+
+	// Tasks the wheel refused past its horizon (monotonic, readable from any thread).
+	unsigned long long dropped() const noexcept {
+		return scheduler_queue.dropped();
 	}
 };
 

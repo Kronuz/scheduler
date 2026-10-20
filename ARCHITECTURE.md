@@ -52,8 +52,10 @@ on nanoseconds since the steady-clock epoch:
 `4800 × 18 s = 86 400 s = exactly 24 h`. The bottom level has 1 ms granularity;
 the wheel as a whole spans 24 hours. A task scheduled further out than that
 overflows: `StashSlots::add` throws `std::out_of_range("stash overflow")`, which
-`SchedulerQueue::add` catches and logs (a no-op by default). Within the horizon,
-`add` drops the task into the slot for its wakeup-time key.
+`SchedulerQueue::try_add` catches: it counts the task in `dropped()`, calls the
+trace hooks (no-ops by default), and returns false. `add` is `try_add` with the
+result ignored, so existing callers keep their behaviour and the drop is still
+counted. Within the horizon, the task goes into the slot for its wakeup-time key.
 
 The queue keeps two `StashContext`s: `ctx` for peep/walk (consume), `cctx` for
 clean (GC). `clean_checkpoint()` snapshots the first/last valid keys from `ctx`

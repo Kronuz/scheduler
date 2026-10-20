@@ -14,6 +14,13 @@ CRTP base for a cancellable scheduled task.
 - `Scheduler(std::string name)` — starts the scheduler thread immediately.
 - `add(task)` / `add(task, wakeup_time)` — schedule (`wakeup_time` clamped to not
   be in the past; the one-arg form expects `task->wakeup_time` already set).
+- `try_add(task)` / `try_add(task, wakeup_time) -> bool` — the same, but false
+  when the task was not scheduled: past the 24 h horizon, or after `finish()`
+  began. `add` drops such a task silently.
+- `dropped() -> unsigned long long` — tasks refused past the horizon by `add` or
+  `try_add` since construction; monotonic and readable from any thread (a relaxed
+  load). Refusals after `finish()` are not counted. A host polls it into its
+  metrics; a nonzero value means some `add` caller lost a task.
 - `finish(wait = 10) -> bool` / `join(timeout = 60s) -> bool` — stop and wait.
 - runs each due task **inline** on the scheduler thread.
 
