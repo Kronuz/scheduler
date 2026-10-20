@@ -28,7 +28,6 @@
 #include <cstdint>                // for std::uint8_t
 #include <memory>
 #include <mutex>                  // for std::condition_variable, std::mutex
-#include <new>                    // for std::bad_alloc
 #include <string>                 // for std::string
 #include <utility>                // for std::move
 
@@ -65,7 +64,7 @@ enum class schedule_result : std::uint8_t {
 	scheduled,      // on the wheel; fires at its wakeup time unless cleared
 	past_horizon,   // more than the wheel's 24 h span ahead
 	stopping,       // finish() has begun
-	no_memory,      // the wheel could not allocate (std::bad_alloc)
+	no_memory,      // the wheel could not allocate before claiming a slot
 };
 
 
@@ -203,20 +202,22 @@ public:
 		queue.next(cctx, &task);
 	}
 
-	// past_horizon when the wheel refuses the task (~24 h from the walk's
-	// low-water mark), no_memory when stash cannot allocate (no trace call under
-	// OOM); either way the task never fires.
+	// stash's result, one to one: past_horizon when the wheel refuses the task
+	// (~24 h from the walk's low-water mark), no_memory when stash could not
+	// allocate before claiming a slot (no trace call under OOM); either way the
+	// task never fires. stash terminates on a failure after the claim.
 	schedule_result add(const TaskType& task, std::chrono::steady_clock::time_point time_point) noexcept {
-		try {
-			if (queue.add(ctx, std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count(), task)) {
+		switch (queue.add(ctx, std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count(), task)) {
+			case stash_result::placed:
 				return schedule_result::scheduled;
-			}
-			L_DEBUG_HOOK("BaseScheduler::OVERFLOW", "BaseScheduler::" + BROWN + "Stash overflow! task dropped (scheduled past the ~24h wheel horizon)" + CLEAR_COLOR);
-			L_SCHEDULER("BaseScheduler::" + BROWN + "Stash overflow!" + CLEAR_COLOR + "\n");
-			return schedule_result::past_horizon;
-		} catch (const std::bad_alloc&) {
-			return schedule_result::no_memory;
+			case stash_result::past_horizon:
+				L_DEBUG_HOOK("BaseScheduler::OVERFLOW", "BaseScheduler::" + BROWN + "Stash overflow! task dropped (scheduled past the ~24h wheel horizon)" + CLEAR_COLOR);
+				L_SCHEDULER("BaseScheduler::" + BROWN + "Stash overflow!" + CLEAR_COLOR + "\n");
+				return schedule_result::past_horizon;
+			case stash_result::no_memory:
+				break;
 		}
+		return schedule_result::no_memory;
 	}
 };
 

@@ -80,9 +80,10 @@ and exposes the source dir as a `PUBLIC` include. The test target is
 - **`SchedulerQueue`'s wheel geometry is exactly 24 h at 1 ms granularity.** The
   four `StashSlots` levels (`50×1ms`, `10×50ms`, `36×500ms`, `4800×18s`) multiply
   to 86 400 s. Changing a `Div`/`Mod`/`Size` changes the horizon or resolution
-  and the overflow point. `SchedulerQueue::add()` maps stash's false to
-  `schedule_result::past_horizon` and catches `std::bad_alloc` as `no_memory`;
-  every `add` and `debounce` is `noexcept`, so keep those catches.
+  and the overflow point. `SchedulerQueue::add()` maps stash's `stash_result` one
+  to one (`placed`, `past_horizon`, `no_memory`); stash's `add` is `noexcept` and
+  terminates on a failure after claiming a slot. `debounce` is `noexcept` too and
+  catches `std::bad_alloc` from its own allocations as `no_memory`.
 - **A refused debounce leaves nothing pending.** A touch adds its task under the
   status mutex and erases the key's status on any refusal. A fire-path re-arm
   refused as `stopping` or `no_memory` runs the call on the fire thread; one

@@ -51,11 +51,12 @@ on nanoseconds since the steady-clock epoch:
 
 `4800 × 18 s = 86 400 s = exactly 24 h`. The bottom level has 1 ms granularity;
 the wheel as a whole spans 24 hours. A task scheduled further out than that
-overflows: `StashSlots::add` returns false and stores nothing, and
-`SchedulerQueue::add` calls the trace hooks (no-ops by default) and returns
-`schedule_result::past_horizon`. Every `add` is `noexcept` and returns a
+overflows: `StashSlots::add` returns `stash_result::past_horizon` and stores
+nothing, and `SchedulerQueue::add` calls the trace hooks (no-ops by default) and
+returns `schedule_result::past_horizon`. Every `add` is `noexcept` and returns a
 `schedule_result`: `scheduled`, or why the task will never fire: `past_horizon`,
-`no_memory` (it catches stash's `std::bad_alloc`) or, in `BaseScheduler`,
+`no_memory` (stash's own `no_memory`: an allocation before it claimed a slot
+failed; one after the claim terminates the process) or, in `BaseScheduler`,
 `stopping` once `finish()` began. A caller that ignores the result drops the task
 as before. Within the horizon, the task goes into the slot for its wakeup-time
 key. The queue's `walk`, `peep`, `clean` and `clean_checkpoint` are `noexcept`:

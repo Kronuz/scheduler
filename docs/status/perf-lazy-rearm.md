@@ -15,9 +15,8 @@ Done, ready for review with the past-horizon follow-up; not merged. Results in
 - Owner's follow-up, no silent drops (f92ba00 tried `try_add` and a `dropped()` count; eca6062 a
   `bool`; the owner settled on an enum): every `add` overload and `debounce` / `delayed_debounce`
   are `noexcept` and return `schedule_result { scheduled, past_horizon, stopping, no_memory }`,
-  not `[[nodiscard]]`. stash's `add` stays `bool` (pinned to stash `perf/window-epoch` e359978
-  until it lands); the scheduler maps false to `past_horizon` and `std::bad_alloc` to
-  `no_memory`. A refused touch erases the key's status (the add runs under the status mutex, so a
+  not `[[nodiscard]]`. stash's `add` returns `stash_result` (pinned to stash `perf/window-epoch`
+  until it lands), mapped one to one. A refused touch erases the key's status (the add runs under the status mutex, so a
   later touch on a pending call knows it is on the wheel); a refused fire-path re-arm runs the
   call on the fire thread and releases the key. Owner's refinement (past_horizon is an error,
   never run now): a fire-path re-arm refused as `past_horizon` drops the call, releases the key
@@ -44,7 +43,10 @@ Done, ready for review with the past-horizon follow-up; not merged. Results in
   also defines; CMake now skips it only when the C++ or linker flags (any config) carry
   `-fsanitize=thread` (CI passes TSan through `CMAKE_CXX_FLAGS_RELWITHDEBINFO`), so it still
   runs under ASan+UBSan. Checked with CI-shaped TSan and ASan configs locally.
-- stash repinned to e359978 (DW11: no hole after a failed allocation).
+- Owner's fail-fast decision on DW11: stash's `add` is `noexcept` and returns `stash_result
+  { placed, past_horizon, no_memory }` (`no_memory` only before it claims a slot; a failure
+  after the claim terminates). `SchedulerQueue::add` maps it one to one, with no `try`/`catch`
+  around stash. stash repinned to its fail-fast commit.
 
 ## Blocked on
 
