@@ -108,36 +108,37 @@ static void test_clear_cancels() {
 
 
 // ---------------------------------------------------------------------------
-// 1c. Scheduler: a task past the 24 h horizon is refused and counted, not lost
-// silently: try_add() returns false, add() drops it, and both count it.
+// 1c. Scheduler: add() reports a refusal instead of dropping silently. A task
+// past the 24 h horizon returns false and never fires; so does an add during
+// shutdown; a normal add returns true and fires.
 // ---------------------------------------------------------------------------
 
-static void test_past_horizon() {
+static void test_add_result() {
 	g_inline_ran.store(0);
+	{
+		std::lock_guard<std::mutex> lk(g_order_mtx);
+		g_order.clear();
+	}
 	InlineSched sched("SCHED3");
+	static_assert(noexcept(sched.add(std::shared_ptr<InlineTaskBase>{}, std::chrono::steady_clock::now())));
 
 	auto now = std::chrono::steady_clock::now();
-	assert(sched.dropped() == 0);
-	bool added = sched.try_add(std::make_shared<OrderTask>(-1), now + 48h);
-	assert(!added && "past-horizon try_add accepted");
-	assert(sched.dropped() == 1 && "past-horizon try_add not counted");
-	sched.add(std::make_shared<OrderTask>(-2), now + 48h);
-	assert(sched.dropped() == 2 && "past-horizon add not counted");
-
-	added = sched.try_add(std::make_shared<OrderTask>(7), now + 50ms);
-	assert(added);
+	bool added = sched.add(std::make_shared<OrderTask>(-1), now + 48h);
+	assert(!added && "past-horizon add accepted");
+	added = sched.add(std::make_shared<OrderTask>(7), now + 50ms);
+	assert(added && "normal add refused");
 	for (int i = 0; i < 100 && g_inline_ran.load() < 1; ++i) {
 		std::this_thread::sleep_for(20ms);
 	}
 	sched.finish();
-	assert(g_inline_ran.load() == 1);
+	added = sched.add(std::make_shared<OrderTask>(-2), std::chrono::steady_clock::now() + 10ms);
+	assert(!added && "add during shutdown accepted");
+	std::this_thread::sleep_for(50ms);
 
-	// After finish() a task is refused too, but it is a shutdown, not a drop.
-	added = sched.try_add(std::make_shared<OrderTask>(-3), std::chrono::steady_clock::now() + 50ms);
-	assert(!added);
-	assert(sched.dropped() == 2);
+	std::lock_guard<std::mutex> lk(g_order_mtx);
+	assert(g_inline_ran.load() == 1 && g_order.size() == 1 && g_order[0] == 7 && "a refused task fired");
 	(void)added;
-	std::printf("scheduler OK: past-horizon tasks refused and counted (%llu dropped)\n", sched.dropped());
+	std::printf("scheduler OK: add() returns true when scheduled, false past the horizon and during shutdown\n");
 }
 
 
@@ -460,7 +461,7 @@ static void test_debouncer_rearm() {
 int main() {
 	test_inline_scheduler();
 	test_clear_cancels();
-	test_past_horizon();
+	test_add_result();
 	test_threaded_scheduler();
 	test_cancel_after_dispatch();
 	test_debouncer();

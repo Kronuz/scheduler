@@ -95,8 +95,8 @@ worker pool, and a debounced burst.
 - ✅ Coalescing bursts per key: "fsync this file soon", "replicate this shard soon".
 - ❌ Sub-millisecond deadlines or hard real-time: the wheel's resolution is 1 ms
   and tasks run on a regular thread.
-- ❌ Tasks more than 24 hours out: they overflow the wheel. `try_add` returns
-  false for them, `add` drops them, and `dropped()` counts both.
+- ❌ Tasks more than 24 hours out: they overflow the wheel. `add` returns
+  false for them (and during shutdown), and they never fire.
 
 ## 📚 Documentation
 

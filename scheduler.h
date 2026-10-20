@@ -27,6 +27,7 @@
 #include <chrono>                 // for std::chrono
 #include <memory>
 #include <mutex>                  // for std::condition_variable, std::mutex
+#include <new>                    // for std::bad_alloc
 #include <string>                 // for std::string
 #include <utility>                // for std::move
 
@@ -149,14 +150,13 @@ private:
 	StashContext ctx;
 	StashContext cctx;
 	_4800_18s queue;
-	std::atomic_ullong atom_dropped{0};
 
 public:
 	SchedulerQueue() :
 		ctx(now()),
 		cctx(now()) { }
 
-	TaskType peep(std::chrono::steady_clock::time_point end_time) {
+	TaskType peep(std::chrono::steady_clock::time_point end_time) noexcept {
 		ctx.op = StashContext::Operation::peep;
 		ctx.begin_key = ctx.atom_first_valid_key.load();
 		ctx.end_key = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time.time_since_epoch()).count();;
@@ -165,7 +165,7 @@ public:
 		return task;
 	}
 
-	TaskType walk() {
+	TaskType walk() noexcept {
 		ctx.op = StashContext::Operation::walk;
 		ctx.pending_floor = StashContext::IDLE;   // fresh per walk: caps first_valid at any pending leaf
 		ctx.begin_key = ctx.atom_first_valid_key.load();
@@ -175,7 +175,7 @@ public:
 		return task;
 	}
 
-	void clean_checkpoint() {
+	void clean_checkpoint() noexcept {
 		auto begin_key = ctx.atom_first_valid_key.load();
 		if (begin_key < cctx.atom_first_valid_key.load()) {
 			cctx.atom_first_valid_key = begin_key;
@@ -183,7 +183,7 @@ public:
 		cctx.atom_last_valid_key = ctx.atom_last_valid_key.load();
 	}
 
-	void clean() {
+	void clean() noexcept {
 		cctx.op = StashContext::Operation::clean;
 		cctx.begin_key = cctx.atom_first_valid_key.load();
 		// Reclaims up to the walk's low-water mark, with no wall-clock margin: stash's
@@ -193,28 +193,20 @@ public:
 		queue.next(cctx, &task);
 	}
 
-	// False, and counted in dropped(), when the wheel refuses a task past its
-	// horizon (~24 h from the walk's low-water mark); the task never fires.
-	bool try_add(const TaskType& task, std::chrono::steady_clock::time_point time_point) {
+	// True if the task was scheduled. False, and the task never fires, when the
+	// wheel refuses it past its horizon (~24 h from the walk's low-water mark)
+	// or stash cannot allocate (no trace call under OOM).
+	bool add(const TaskType& task, std::chrono::steady_clock::time_point time_point) noexcept {
 		try {
-			queue.add(ctx, std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count(), task);
-			return true;
-		} catch (const std::out_of_range&) {
-			atom_dropped.fetch_add(1, std::memory_order_relaxed);
+			if (queue.add(ctx, std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count(), task)) {
+				return true;
+			}
 			L_DEBUG_HOOK("BaseScheduler::OVERFLOW", "BaseScheduler::" + BROWN + "Stash overflow! task dropped (scheduled past the ~24h wheel horizon)" + CLEAR_COLOR);
 			L_SCHEDULER("BaseScheduler::" + BROWN + "Stash overflow!" + CLEAR_COLOR + "\n");
 			return false;
+		} catch (const std::bad_alloc&) {
+			return false;
 		}
-	}
-
-	// Drops a refused task; dropped() still counts it.
-	void add(const TaskType& task, std::chrono::steady_clock::time_point time_point) {
-		try_add(task, time_point);
-	}
-
-	// Tasks refused past the horizon since construction (monotonic, any thread).
-	unsigned long long dropped() const noexcept {
-		return atom_dropped.load(std::memory_order_relaxed);
 	}
 };
 
@@ -318,14 +310,14 @@ public:
 		}
 	}
 
-	// False when the task was not scheduled: past the wheel's horizon (counted
-	// in dropped()) or after finish() began. add() drops it the same way.
-	bool try_add(const TaskType& task) {
+	// True if the task was scheduled; false if refused: past the wheel's
+	// horizon, out of memory, or after finish() began. Never throws.
+	bool add(const TaskType& task) noexcept {
 		if (ending < 0) {
 			auto wakeup_time = task->wakeup_time;
 			assert(wakeup_time > std::chrono::steady_clock::time_point{});
 
-			if (!scheduler_queue.try_add(task, wakeup_time)) {
+			if (!scheduler_queue.add(task, wakeup_time)) {
 				return false;
 			}
 
@@ -345,26 +337,13 @@ public:
 		return false;
 	}
 
-	bool try_add(const TaskType& task, std::chrono::steady_clock::time_point wakeup_time) {
+	bool add(const TaskType& task, std::chrono::steady_clock::time_point wakeup_time) noexcept {
 		auto now = std::chrono::steady_clock::now();
 		if (wakeup_time < now) {
 			wakeup_time = now;
 		}
 		task->wakeup_time = wakeup_time;
-		return try_add(task);
-	}
-
-	void add(const TaskType& task) {
-		try_add(task);
-	}
-
-	void add(const TaskType& task, std::chrono::steady_clock::time_point wakeup_time) {
-		try_add(task, wakeup_time);
-	}
-
-	// Tasks the wheel refused past its horizon (monotonic, readable from any thread).
-	unsigned long long dropped() const noexcept {
-		return scheduler_queue.dropped();
+		return add(task);
 	}
 };
 

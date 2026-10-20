@@ -12,15 +12,12 @@ CRTP base for a cancellable scheduled task.
 ## `Scheduler<ScheduledTaskImpl, ThreadPolicyType policy = regular>`
 
 - `Scheduler(std::string name)` — starts the scheduler thread immediately.
-- `add(task)` / `add(task, wakeup_time)` — schedule (`wakeup_time` clamped to not
-  be in the past; the one-arg form expects `task->wakeup_time` already set).
-- `try_add(task)` / `try_add(task, wakeup_time) -> bool` — the same, but false
-  when the task was not scheduled: past the 24 h horizon, or after `finish()`
-  began. `add` drops such a task silently.
-- `dropped() -> unsigned long long` — tasks refused past the horizon by `add` or
-  `try_add` since construction; monotonic and readable from any thread (a relaxed
-  load). Refusals after `finish()` are not counted. A host polls it into its
-  metrics; a nonzero value means some `add` caller lost a task.
+- `add(task)` / `add(task, wakeup_time) -> bool`, `noexcept` — schedule
+  (`wakeup_time` clamped to not be in the past; the one-arg form expects
+  `task->wakeup_time` already set). True if the task was scheduled; false if it
+  was refused and will never fire: past the 24 h horizon, out of memory inside
+  the wheel, or after `finish()` began. Not `[[nodiscard]]`: a caller that
+  ignores the result keeps the old drop-silently behaviour.
 - `finish(wait = 10) -> bool` / `join(timeout = 60s) -> bool` — stop and wait.
 - runs each due task **inline** on the scheduler thread.
 
