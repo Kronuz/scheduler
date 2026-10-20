@@ -22,7 +22,7 @@ clean; remove it if the semantics change or CPU rises beyond the memory it saves
 
 ## Method
 
-`bench/bench_churn.cc`: the real `Debouncer` built against stash main `a41b2d0`
+`bench/bench_churn.cc` (`-DSCHEDULER_BENCH=ON`): the real `Debouncer` built against stash main `a41b2d0`
 (`FETCHCONTENT_SOURCE_DIR_STASH`), `-O3 -DNDEBUG`, two producer threads touching random keys at
 100,000 touches/s in total for 30 s, then 12 s with no touches. Timeouts are the committer's
 defaults (`opts.cc`): debounce 1 s, busy 3 s, forced within 8 to 10 s, no throttle. Each argument

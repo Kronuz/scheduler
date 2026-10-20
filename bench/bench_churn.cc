@@ -10,7 +10,8 @@
 // checks that every touched key fired with its last touch's arguments (each thread
 // owns a disjoint set of keys, so per-key touch order is its program order).
 //
-//   bench_churn [SECONDS] [RATE] [KEYS] [THREADS] [DRAIN_SECONDS] [DEBOUNCE_MS BUSY_MS FORCE_MS]
+//   cmake -B build -DCMAKE_BUILD_TYPE=Release -DSCHEDULER_BENCH=ON && cmake --build build
+//   build/scheduler_bench_churn [SECONDS] [RATE] [KEYS] [THREADS] [DRAIN_SECONDS] [DEBOUNCE_MS BUSY_MS FORCE_MS]
 //   bench_churn 30 100000 1000 2 12
 //
 // Timeouts default to the committer's (opts.cc): debounce 1 s, busy 3 s, forced

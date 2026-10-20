@@ -54,7 +54,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(scheduler_demo examples/demo.cc)
   target_link_libraries(scheduler_demo PRIVATE scheduler)
 
-  # Cancel churn on a debouncer (manual benchmark, not a test).
-  add_executable(scheduler_bench_churn bench/bench_churn.cc)
-  target_link_libraries(scheduler_bench_churn PRIVATE scheduler)
+  # Cancel churn on a debouncer (manual benchmark, not a test). Opt-in: it replaces
+  # global operator new and delete, which sanitizer runtimes also define.
+  option(SCHEDULER_BENCH "Build bench/bench_churn.cc" OFF)
+  if(SCHEDULER_BENCH)
+    add_executable(scheduler_bench_churn bench/bench_churn.cc)
+    target_link_libraries(scheduler_bench_churn PRIVATE scheduler)
+  endif()
 endif()
