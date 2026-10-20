@@ -20,6 +20,11 @@ Done, ready for review with the past-horizon follow-up; not merged. Results in
   past-horizon add returns false and never fires, an add during shutdown returns false, and a
   normal add returns true and fires.
 
+- Downstream: Xapiand's scheduler, debouncer and logger TUs (manager, handler, discovery, shard,
+  wal, pool, main, logger.cc) compile against this branch, stash d234d24 and the logger branch
+  (`-fsyntax-only` from an existing Xapiand build, no new diagnostics from these headers). Kronuz/logger
+  `fix/refused-add` (a48bce8) now acts on a refused add instead of losing the line.
+
 ## Next
 
 1. Code review of the debouncer change (the fire/re-arm critical section, the throttler release)
@@ -28,4 +33,14 @@ Done, ready for review with the past-horizon follow-up; not merged. Results in
 
 ## Blocked on
 
-Nothing.
+- Owner decision, not blocking this review: the Debouncer ignores `add`'s result at
+  `debouncer.h:179` (the fire path's re-add of a re-armed or throttler task) and `debouncer.h:293`
+  (a touch's new task). Its timeouts are seconds, so only shutdown (or OOM) refuses; then the key
+  keeps a task that never fires, and the pending call is lost: a committer commit, an fsyncher
+  fsync, a db, schema, settings or primary update broadcast, or a replication trigger touched while
+  Xapiand shuts down. A refused throttler loses nothing. This predates the branch (main's `add`
+  ignored the task once `finish()` began). Options: run the call inline on refusal (as the logger
+  now writes due lines), or drop the key's status so nothing stays stuck. Recommendation: run the
+  re-armed call inline in the fire path (already on a worker), and in `debounce()` run it on the
+  caller only when the scheduler is ending; needs the owner's call because it moves user callbacks
+  onto producer threads.
