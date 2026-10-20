@@ -20,6 +20,9 @@ CRTP base for a cancellable scheduled task.
   why a task will never fire: `past_horizon` (more than 24 h out), `stopping`
   (`finish()` began), `no_memory` (the wheel could not allocate).
 - `finish(wait = 10) -> bool` / `join(timeout = 60s) -> bool` — stop and wait.
+- `is_stopping() -> bool`, `noexcept` — `finish()` has begun; `add` returns `stopping`.
+- `within_horizon(wakeup_time) -> bool`, `noexcept` — whether `add` would accept
+  that time now (stash's `horizon()`; it only grows).
 - runs each due task **inline** on the scheduler thread.
 
 ## `ThreadedScheduler<ScheduledTaskImpl, ThreadPolicyType policy = regular>`
@@ -48,9 +51,12 @@ On a `Debouncer`:
   scheduler's refusal, and no task is left pending for the key, so a caller that
   must not lose the call runs it itself on `stopping` or `no_memory`.
   `past_horizon` means a delay longer than the wheel's 24 h: a caller's error,
-  never a reason to run the call early. A pending call that re-arms past the
-  horizon is dropped (reported through `L_DEBUG_HOOK`). `no_memory` also covers a failed copy of
-  the arguments (an earlier pending call is then kept).
+  never a reason to run the call early; a touch that would move a pending call
+  that far is refused and the pending call keeps its target and arguments. After
+  `finish()` began, a touch on a pending key returns `stopping` and releases the
+  key, so the caller runs it. `no_memory` also covers a failed copy of the
+  arguments (an earlier pending call is then kept). The arguments are consumed
+  either way: an rvalue argument is moved from even when the touch is refused.
 - `delayed_debounce(delay, key, args...) -> schedule_result` — same with a fixed
   extra delay.
 - `pending_keys()` — keys with a pending call or throttle window.

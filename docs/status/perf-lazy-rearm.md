@@ -27,11 +27,11 @@ Done, ready for review with the past-horizon follow-up; not merged. Results in
   runs nothing and releases the key), `test/no_memory.cc` (no_memory from `add` and `debounce`,
   nothing pending, a pending call keeps its arguments; a re-arm refused for memory runs the call
   once, early, with the last arguments; a separate executable because it replaces `operator new`,
-  skipped in sanitized builds). Each fails with its fix reverted. TSan and ASan+UBSan, 3 runs.
-- Downstream: Xapiand's scheduler, debouncer and logger TUs (manager, handler, discovery, shard,
-  wal, pool, main, logger.cc) compile against this branch, stash d234d24 and the logger branch
-  (`-fsyntax-only` from an existing Xapiand build, no new diagnostics from these headers). Kronuz/logger
-  `fix/refused-add` (a48bce8) now acts on a refused add instead of losing the line.
+  skipped in TSan builds). Each fails with its fix reverted. TSan and ASan+UBSan, 3 runs.
+- Downstream: Xapiand's 17 TUs that use the scheduler, a debouncer or the logger build against
+  this branch's pins in a full configure of Xapiand's `fix/debounce-refusals` (no new diagnostics
+  from these headers). Kronuz/logger `fix/refused-add` acts on a refused add instead of losing
+  the line.
 
 ## Next
 
@@ -54,10 +54,17 @@ Nothing. The Debouncer refusal question is settled by the owner (above).
 
 ## For reviewers
 
-- stash DW11 is now reachable: `no_memory` keeps the process alive, but a `std::bad_alloc`
-  inside stash after a leaf slot is reserved (the value box, or a leaf chunk) leaves a permanent
-  reserved hole that pins `first_valid`, so the wheel stops reclaiming and, 24 h later, refuses
-  every add as `past_horizon`. Before, the exception propagated out of `add`. A fix belongs in
-  stash (mark the reserved slot drained on failure), not here.
-- The touch path now holds the status mutex across the wheel add (lock order: status mutex, then
-  the scheduler's; nothing takes them the other way). Not re-measured on `bench_churn`.
+- stash DW11 is fixed fail-fast on stash's side: a `std::bad_alloc` before the leaf claim is
+  `stash_result::no_memory` with nothing claimed, which this queue maps to `no_memory`; one after
+  the claim terminates the process. No hole can exist in a running process.
+- The touch path holds the status mutex across the wheel add (lock order: status mutex, then
+  the scheduler's; nothing takes them the other way; the reviewer's TSan probe agrees). Not
+  re-measured on `bench_churn`.
+- Code review conditions (`review-wt/stash/docs/reviews/window-refusals-code.md`): C1 fixed (a
+  touch on a pending key after `finish()` returns `stopping` and releases the key;
+  `test_debouncer_touch_after_finish` and the reviewer's `debouncer_probe.cc` fail on the
+  previous code: `pending-after=scheduled ran=0`, 58-61 keys left pending; now `stopping`, 0
+  left). CR2 fixed (a touch whose target would pass the horizon returns `past_horizon` and keeps
+  the pending call; `test_debouncer_refusals` asserts the earlier call fires). Residual: a key
+  whose task was pending when `finish()` began and is never touched again is still not run (the
+  pool stops first); Xapiand's pool close commits writables.

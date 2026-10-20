@@ -459,9 +459,9 @@ static void test_debouncer_rearm() {
 }
 
 // debounce() reports the scheduler's result, and a refused touch leaves nothing
-// pending. A re-arm refused past the horizon in the fire path drops the call and
-// releases the key: it was never meant to run a day early. Force timeouts of
-// 48 h let a touch move a pending call past the wheel's 24 h horizon.
+// pending. A touch that would move a pending call past the 24 h horizon is
+// refused (past_horizon) and leaves that call as it was, so it still fires with
+// its earlier arguments. Force timeouts of 48 h let a touch reach that far.
 static void test_debouncer_refusals() {
 	std::mutex mtx;
 	std::vector<int> calls;
@@ -480,18 +480,18 @@ static void test_debouncer_refusals() {
 
 	result = deb.debounce(2, 2, 10);
 	assert(result == schedule_result::scheduled);
-	result = deb.delayed_debounce(25h, 2, 2, 11);   // moves the pending call's target past 24 h
-	assert(result == schedule_result::scheduled);
-	// The task fires at ~50 ms, tries to re-arm 25 h out, and is refused.
+	result = deb.delayed_debounce(25h, 2, 2, 11);   // would move the pending call past 24 h
+	assert(result == schedule_result::past_horizon && "a touch past the horizon moved a pending call");
+	// The pending call keeps its target (~50 ms) and its arguments.
 	for (auto until = std::chrono::steady_clock::now() + 5s; deb.pending_keys() != 0 && std::chrono::steady_clock::now() < until;) {
 		std::this_thread::sleep_for(10ms);
 	}
 	std::this_thread::sleep_for(100ms);
 	{
 		std::lock_guard<std::mutex> lk(mtx);
-		assert(calls.empty() && "a re-arm refused past the horizon ran the call");
+		assert(calls.size() == 1 && calls[0] == 10 && "a touch past the horizon dropped the earlier call");
 	}
-	assert(deb.pending_keys() == 0 && "a re-arm refused past the horizon left the key pending");
+	assert(deb.pending_keys() == 0);
 
 	deb.finish();
 	result = deb.debounce(3, 3, 30);
@@ -499,9 +499,31 @@ static void test_debouncer_refusals() {
 	assert(deb.pending_keys() == 0 && "a touch refused at shutdown left the key pending");
 	std::this_thread::sleep_for(100ms);
 	std::lock_guard<std::mutex> lk(mtx);
-	assert(calls.empty() && "a refused touch or past-horizon re-arm ran a call");
+	assert(calls.size() == 1 && "a refused touch ran a call");
 	(void)result;
-	std::printf("debouncer refusals OK: past_horizon and stopping leave nothing pending; a past-horizon re-arm ran nothing\n");
+	std::printf("debouncer refusals OK: past_horizon and stopping leave nothing pending; a past-horizon touch keeps the pending call\n");
+}
+
+// After finish(), a touch on a key whose call is still pending returns stopping
+// and releases the key: the stopping pool may never run that call, so the
+// caller must (the reviewer's debouncer_probe.cc shutdown case).
+static void test_debouncer_touch_after_finish() {
+	std::atomic<int> ran{0};
+	auto deb = make_debouncer<int>("DTF", "DT{:02}", 2,
+		[&](int, int) { ran.fetch_add(1); }, 0ms, 200ms, 200ms, 1s, 1s);
+	auto before = deb.debounce(1, 1, 10);   // pending, due at ~200 ms
+	deb.finish();
+	auto pending_after = deb.debounce(1, 1, 11);
+	auto fresh_after = deb.debounce(2, 2, 20);
+	std::this_thread::sleep_for(600ms);
+	assert(before == schedule_result::scheduled);
+	assert(!(pending_after == schedule_result::scheduled && ran.load() == 0) && "a touch after finish() was promised a call nothing runs");
+	assert(pending_after == schedule_result::stopping && fresh_after == schedule_result::stopping);
+	assert(deb.pending_keys() == 0 && "a key stayed pending after finish()");
+	(void)before;
+	(void)pending_after;
+	(void)fresh_after;
+	std::printf("debouncer OK: a touch after finish() on a pending key returns stopping\n");
 }
 
 int main() {
@@ -514,6 +536,7 @@ int main() {
 	test_debouncer_force_window();
 	test_debouncer_rearm();
 	test_debouncer_refusals();
+	test_debouncer_touch_after_finish();
 	test_debouncer_destructor_teardown();
 	std::printf("all scheduler tests passed\n");
 	return 0;

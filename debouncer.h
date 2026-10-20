@@ -321,6 +321,17 @@ Debouncer<Key, Func, Tuple, thread_policy>::delayed_debounce(std::chrono::millis
 				next_wakeup_time = status->target;
 			}
 			if (!status->task->throttler) {
+				if (this->is_stopping()) {
+					// finish() began: the pending task may never run (the pool is
+					// stopping). Hand the call back; the task finds itself superseded.
+					statuses.erase(key);
+					return schedule_result::stopping;
+				}
+				if (!this->within_horizon(next_wakeup_time)) {
+					// Moving the target past the horizon would make the re-arm drop
+					// the pending call: keep it as it is and refuse this touch.
+					return schedule_result::past_horizon;
+				}
 				// A call is pending: move its target, and it re-arms itself.
 				status->target = next_wakeup_time;
 				status->args = std::move(call_args);

@@ -155,14 +155,26 @@ Refusals. `debounce` returns the scheduler's `schedule_result` and is `noexcept`
 (`std::bad_alloc` becomes `no_memory`). A touch that adds a task does so under the
 status mutex, so a later touch that finds the task pending knows it is on the
 wheel; if the add is refused, the key's status is erased and nothing stays
-pending. A touch on a pending call returns `scheduled` without adding; if copying
-its arguments fails it returns `no_memory` and the pending call keeps its earlier
-arguments. A re-arm refused in the fire path has no caller to tell. On
-`stopping` or `no_memory` the task runs the call there and then, a little early,
-and releases or throttles the key as a fire does. On `past_horizon` (a delay
-longer than the wheel allows, never meant to run a day early) it drops the call,
+pending. A touch on a pending call adds nothing and returns `scheduled`, with
+three exceptions:
+
+- once `finish()` began (`is_stopping()`) it erases the key and returns
+  `stopping`: the stopping pool may never run the pending task, so the caller
+  runs the call (the task, if it fires, finds itself superseded);
+- if the new target is past the horizon (`within_horizon()`, stash's
+  `horizon()`) it returns `past_horizon` and leaves the pending call as it was,
+  target and arguments, so an earlier in-horizon call still fires;
+- if copying its arguments fails it returns `no_memory` and the pending call
+  keeps its earlier arguments.
+
+A re-arm refused in the fire path has no caller to tell. On `stopping` or
+`no_memory` the task runs the call there and then, a little early, and releases
+or throttles the key as a fire does. On `past_horizon` it drops the call,
 releases the key, and reports it through `L_DEBUG_HOOK("Debouncer::PAST_HORIZON",
-...)`. A refused throttler just releases the key. Releasing or throttling:
+...)`; touches cannot move a target past the horizon, so this is a backstop. A
+refused throttler just releases the key. A key whose task was pending when
+`finish()` began and is never touched again is not run: the pool stops first.
+Releasing or throttling:
 
 - If `throttle_time <= debounce_timeout`, just `release(key)` (erase the status),
   so the next touch starts fresh.

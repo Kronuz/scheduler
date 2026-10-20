@@ -206,6 +206,11 @@ public:
 	// (~24 h from the walk's low-water mark), no_memory when stash could not
 	// allocate before claiming a slot (no trace call under OOM); either way the
 	// task never fires. stash terminates on a failure after the claim.
+	// Whether add() would accept a task at time_point now; the horizon only grows.
+	bool within_horizon(std::chrono::steady_clock::time_point time_point) const noexcept {
+		return static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count()) < queue.horizon(ctx);
+	}
+
 	schedule_result add(const TaskType& task, std::chrono::steady_clock::time_point time_point) noexcept {
 		switch (queue.add(ctx, std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count(), task)) {
 			case stash_result::placed:
@@ -254,6 +259,16 @@ public:
 
 	const std::string& name() const noexcept {
 		return _name;
+	}
+
+	// finish() has begun: add() refuses with schedule_result::stopping.
+	bool is_stopping() const noexcept {
+		return ending.load() >= 0;
+	}
+
+	// Whether add() would accept a task at wakeup_time now (the 24 h horizon).
+	bool within_horizon(std::chrono::steady_clock::time_point wakeup_time) const noexcept {
+		return scheduler_queue.within_horizon(wakeup_time);
 	}
 
 	void operator()() {
