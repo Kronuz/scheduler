@@ -12,12 +12,13 @@ CRTP base for a cancellable scheduled task.
 ## `Scheduler<ScheduledTaskImpl, ThreadPolicyType policy = regular>`
 
 - `Scheduler(std::string name)` — starts the scheduler thread immediately.
-- `add(task)` / `add(task, wakeup_time) -> bool`, `noexcept` — schedule
-  (`wakeup_time` clamped to not be in the past; the one-arg form expects
-  `task->wakeup_time` already set). True if the task was scheduled; false if it
-  was refused and will never fire: past the 24 h horizon, out of memory inside
-  the wheel, or after `finish()` began. Not `[[nodiscard]]`: a caller that
-  ignores the result keeps the old drop-silently behaviour.
+- `add(task)` / `add(task, wakeup_time) -> schedule_result`, `noexcept` —
+  schedule (`wakeup_time` clamped to not be in the past; the one-arg form expects
+  `task->wakeup_time` already set). Not `[[nodiscard]]`: a caller that ignores the
+  result keeps the old drop-silently behaviour.
+- `enum class schedule_result : std::uint8_t` — `scheduled` (on the wheel), or
+  why a task will never fire: `past_horizon` (more than 24 h out), `stopping`
+  (`finish()` began), `no_memory` (the wheel could not allocate).
 - `finish(wait = 10) -> bool` / `join(timeout = 60s) -> bool` — stop and wait.
 - runs each due task **inline** on the scheduler thread.
 
@@ -41,9 +42,15 @@ Construct via the factories, which deduce `Func`/`Tuple` for you:
 
 On a `Debouncer`:
 
-- `debounce(key, args...)` — touch a key; collapses rapid touches into one
-  eventual call to `func(args...)` carrying the last arguments.
-- `delayed_debounce(delay, key, args...)` — same with a fixed extra delay.
+- `debounce(key, args...) -> schedule_result`, `noexcept` — touch a key;
+  collapses rapid touches into one eventual call to `func(args...)` carrying the
+  last arguments. `scheduled` when a call for the key is pending; otherwise the
+  scheduler's refusal, and no task is left pending for the key, so a caller that
+  must not lose the call runs it itself. `no_memory` also covers a failed copy of
+  the arguments (an earlier pending call is then kept).
+- `delayed_debounce(delay, key, args...) -> schedule_result` — same with a fixed
+  extra delay.
+- `pending_keys()` — keys with a pending call or throttle window.
 
 The timing model: a fresh key fires after `debounce_timeout`; each subsequent
 touch pushes the call out by `debounce_busy_timeout`, but never past a randomized

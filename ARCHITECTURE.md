@@ -52,13 +52,15 @@ on nanoseconds since the steady-clock epoch:
 `4800 × 18 s = 86 400 s = exactly 24 h`. The bottom level has 1 ms granularity;
 the wheel as a whole spans 24 hours. A task scheduled further out than that
 overflows: `StashSlots::add` returns false and stores nothing, and
-`SchedulerQueue::add` calls the trace hooks (no-ops by default) and returns false,
-so the caller knows the task will never fire. Every `add` is `noexcept` and
-returns whether the task was scheduled; it also returns false when stash cannot
-allocate (it catches `std::bad_alloc`) and, in `BaseScheduler`, after `finish()`
-began. A caller that ignores the result drops the task as before. The queue's
-`walk`, `peep`, `clean` and `clean_checkpoint` are `noexcept`: stash's walk never
-allocates, and the `shared_ptr` task values copy and test without throwing. Within the horizon, the task goes into the slot for its wakeup-time key.
+`SchedulerQueue::add` calls the trace hooks (no-ops by default) and returns
+`schedule_result::past_horizon`. Every `add` is `noexcept` and returns a
+`schedule_result`: `scheduled`, or why the task will never fire: `past_horizon`,
+`no_memory` (it catches stash's `std::bad_alloc`) or, in `BaseScheduler`,
+`stopping` once `finish()` began. A caller that ignores the result drops the task
+as before. Within the horizon, the task goes into the slot for its wakeup-time
+key. The queue's `walk`, `peep`, `clean` and `clean_checkpoint` are `noexcept`:
+stash's walk never allocates, and the `shared_ptr` task values copy and test
+without throwing.
 
 The queue keeps two `StashContext`s: `ctx` for peep/walk (consume), `cctx` for
 clean (GC). `clean_checkpoint()` snapshots the first/last valid keys from `ctx`
@@ -146,7 +148,17 @@ When the task fires (`DebouncerTask::operator()`), it takes the status mutex. If
 fresh task at `target` and returns. Otherwise it takes the arguments and, in the
 same critical section, releases or throttles the key, then runs
 `std::apply(func, args)` outside the lock. Doing both under one lock is what keeps
-a touch from landing between them and being dropped. Releasing or throttling:
+a touch from landing between them and being dropped.
+
+Refusals. `debounce` returns the scheduler's `schedule_result` and is `noexcept`
+(`std::bad_alloc` becomes `no_memory`). A touch that adds a task does so under the
+status mutex, so a later touch that finds the task pending knows it is on the
+wheel; if the add is refused, the key's status is erased and nothing stays
+pending. A touch on a pending call returns `scheduled` without adding; if copying
+its arguments fails it returns `no_memory` and the pending call keeps its earlier
+arguments. A re-arm refused in the fire path has no caller to tell, so the task
+runs the call there and then, a little early, and releases or throttles the key
+as a fire does; a refused throttler just releases it. Releasing or throttling:
 
 - If `throttle_time <= debounce_timeout`, just `release(key)` (erase the status),
   so the next touch starts fresh.

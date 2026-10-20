@@ -26,6 +26,7 @@
 #include <chrono>                            // for std::chrono
 #include <memory>                            // for std::shared_ptr, std::make_shared
 #include <mutex>                             // for std::mutex
+#include <new>                               // for std::bad_alloc
 #include <optional>                          // for std::optional
 #include <string>                            // for std::string
 #include <tuple>                             // for std::make_tuple, std::apply
@@ -107,11 +108,21 @@ public:
 		}
 	}
 
+	// scheduled if a call for the key is pending (a new one, or one this touch
+	// moved); otherwise why not, and no task that never fires is left for the
+	// key. noexcept: std::bad_alloc maps to no_memory; an argument type whose
+	// copy throws anything else terminates.
 	template <typename... Args>
-	void debounce(const Key& key, Args&&... args);
+	schedule_result debounce(const Key& key, Args&&... args) noexcept;
 
 	template <typename... Args>
-	void delayed_debounce(std::chrono::milliseconds delay, const Key& key, Args&&... args);
+	schedule_result delayed_debounce(std::chrono::milliseconds delay, const Key& key, Args&&... args) noexcept;
+
+	// Keys with a pending call or throttle window.
+	size_t pending_keys() {
+		std::lock_guard<std::mutex> statuses_lk(statuses_mtx);
+		return statuses.size();
+	}
 };
 
 
@@ -175,8 +186,26 @@ DebouncerTask<Key, Func, Tuple, thread_policy>::operator()()
 			next = debouncer.throttle_locked(it);
 		}
 	}
-	if (next) {
-		debouncer.add(next);
+	if (next && debouncer.add(next) != schedule_result::scheduled) {
+		// Refused (shutting down, or out of memory). A re-arm has no caller to
+		// tell: run the call now, a little early, and release the key as a fire
+		// does. A refused throttler just releases the key.
+		std::shared_ptr<DebouncerTask<Key, Func, Tuple, thread_policy>> throttler;
+		{
+			std::lock_guard<std::mutex> statuses_lk(debouncer.statuses_mtx);
+			auto it = debouncer.statuses.find(key);
+			if (it != debouncer.statuses.end() && it->second.task == next) {
+				if (next->throttler) {
+					debouncer.statuses.erase(it);
+				} else {
+					args = std::move(it->second.args);
+					throttler = debouncer.throttle_locked(it);
+				}
+			}
+		}
+		if (throttler && debouncer.add(throttler) != schedule_result::scheduled) {
+			debouncer.release(key, throttler.get());
+		}
 	}
 	if (args) {
 		std::apply(debouncer.func, std::move(*args));
@@ -219,30 +248,31 @@ Debouncer<Key, Func, Tuple, thread_policy>::throttle_locked(typename std::unorde
 
 template <typename Key, typename Func, typename Tuple, ThreadPolicyType thread_policy>
 template <typename... Args>
-inline void
-Debouncer<Key, Func, Tuple, thread_policy>::debounce(const Key& key, Args&&... args)
+inline schedule_result
+Debouncer<Key, Func, Tuple, thread_policy>::debounce(const Key& key, Args&&... args) noexcept
 {
 	L_CALL("Debouncer::debounce(<key>, ...)");
 
-	delayed_debounce(0ms, key, std::forward<Args>(args)...);
+	return delayed_debounce(0ms, key, std::forward<Args>(args)...);
 }
 
 
 template <typename Key, typename Func, typename Tuple, ThreadPolicyType thread_policy>
 template <typename... Args>
-inline void
-Debouncer<Key, Func, Tuple, thread_policy>::delayed_debounce(std::chrono::milliseconds delay, const Key& key, Args&&... args)
+inline schedule_result
+Debouncer<Key, Func, Tuple, thread_policy>::delayed_debounce(std::chrono::milliseconds delay, const Key& key, Args&&... args) noexcept
 {
 	L_CALL("Debouncer::delayed_debounce(<delay>, <key>, ...)");
 
-	std::shared_ptr<DebouncerTask<Key, Func, Tuple, thread_policy>> task;
+	auto now = std::chrono::steady_clock::now();
 
-	{
+	// Held across the add below: a touch that sees this key's task pending
+	// must know it is on the wheel, or a refusal could drop its arguments.
+	std::lock_guard<std::mutex> statuses_lk(statuses_mtx);
+	bool fresh = false;   // the status has no live task: drop it on any refusal
+	try {
 		std::chrono::steady_clock::time_point next_wakeup_time;
 
-		auto now = std::chrono::steady_clock::now();
-
-		std::lock_guard<std::mutex> statuses_lk(statuses_mtx);
 		auto it = statuses.find(key);
 
 		Status* status;
@@ -253,6 +283,7 @@ Debouncer<Key, Func, Tuple, thread_policy>::delayed_debounce(std::chrono::millis
 				now + random_time(debounce_min_force_timeout, debounce_max_force_timeout) + delay,
 			};
 			status = &status_ref;
+			fresh = true;
 			next_wakeup_time = now + debounce_timeout + delay;
 		} else {
 			status = &(it->second);
@@ -270,6 +301,10 @@ Debouncer<Key, Func, Tuple, thread_policy>::delayed_debounce(std::chrono::millis
 			next_wakeup_time = status->max_wakeup_time;
 		}
 
+		// Built before anything changes, so a failed copy keeps a pending call's
+		// earlier arguments.
+		Tuple call_args(std::forward<Args>(args)...);
+
 		if (status->task) {
 			// Never fire earlier than the pending task or target; the latest arguments win.
 			if (next_wakeup_time < status->target) {
@@ -278,19 +313,30 @@ Debouncer<Key, Func, Tuple, thread_policy>::delayed_debounce(std::chrono::millis
 			if (!status->task->throttler) {
 				// A call is pending: move its target, and it re-arms itself.
 				status->target = next_wakeup_time;
-				status->args.emplace(std::forward<Args>(args)...);
-				return;
+				status->args = std::move(call_args);
+				return schedule_result::scheduled;
 			}
 			status->task->clear();
+			fresh = true;
 		}
-		task = std::make_shared<DebouncerTask<Key, Func, Tuple, thread_policy>>(*this, key, false);
+		auto task = std::make_shared<DebouncerTask<Key, Func, Tuple, thread_policy>>(*this, key, false);
 		task->wakeup_time = next_wakeup_time;
+		auto result = this->add(task);
+		if (result != schedule_result::scheduled) {
+			// Refused: nothing stays pending for the key (no task that never fires).
+			statuses.erase(key);
+			return result;
+		}
 		status->task = task;
 		status->target = next_wakeup_time;
-		status->args.emplace(std::forward<Args>(args)...);
+		status->args = std::move(call_args);
+		return result;
+	} catch (const std::bad_alloc&) {
+		if (fresh) {
+			statuses.erase(key);
+		}
+		return schedule_result::no_memory;
 	}
-
-	this->add(task);
 }
 
 

@@ -25,6 +25,7 @@
 #include <atomic>                 // for std::atomic
 #include <cassert>                // for assert
 #include <chrono>                 // for std::chrono
+#include <cstdint>                // for std::uint8_t
 #include <memory>
 #include <mutex>                  // for std::condition_variable, std::mutex
 #include <new>                    // for std::bad_alloc
@@ -57,6 +58,15 @@ using namespace std::chrono_literals;
 #define L_SCHEDULER_DEFINED
 #define L_SCHEDULER L_NOTHING
 #endif
+
+
+// What add() (and Debouncer::debounce()) did with a task: only `scheduled` fires.
+enum class schedule_result : std::uint8_t {
+	scheduled,      // on the wheel; fires at its wakeup time unless cleared
+	past_horizon,   // more than the wheel's 24 h span ahead
+	stopping,       // finish() has begun
+	no_memory,      // the wheel could not allocate (std::bad_alloc)
+};
 
 
 template <typename SchedulerImpl, typename ScheduledTaskImpl, ThreadPolicyType thread_policy>
@@ -193,19 +203,19 @@ public:
 		queue.next(cctx, &task);
 	}
 
-	// True if the task was scheduled. False, and the task never fires, when the
-	// wheel refuses it past its horizon (~24 h from the walk's low-water mark)
-	// or stash cannot allocate (no trace call under OOM).
-	bool add(const TaskType& task, std::chrono::steady_clock::time_point time_point) noexcept {
+	// past_horizon when the wheel refuses the task (~24 h from the walk's
+	// low-water mark), no_memory when stash cannot allocate (no trace call under
+	// OOM); either way the task never fires.
+	schedule_result add(const TaskType& task, std::chrono::steady_clock::time_point time_point) noexcept {
 		try {
 			if (queue.add(ctx, std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count(), task)) {
-				return true;
+				return schedule_result::scheduled;
 			}
 			L_DEBUG_HOOK("BaseScheduler::OVERFLOW", "BaseScheduler::" + BROWN + "Stash overflow! task dropped (scheduled past the ~24h wheel horizon)" + CLEAR_COLOR);
 			L_SCHEDULER("BaseScheduler::" + BROWN + "Stash overflow!" + CLEAR_COLOR + "\n");
-			return false;
+			return schedule_result::past_horizon;
 		} catch (const std::bad_alloc&) {
-			return false;
+			return schedule_result::no_memory;
 		}
 	}
 };
@@ -310,15 +320,15 @@ public:
 		}
 	}
 
-	// True if the task was scheduled; false if refused: past the wheel's
-	// horizon, out of memory, or after finish() began. Never throws.
-	bool add(const TaskType& task) noexcept {
+	// scheduled, or why not: past the wheel's horizon, out of memory, or
+	// stopping (finish() began). Never throws.
+	schedule_result add(const TaskType& task) noexcept {
 		if (ending < 0) {
 			auto wakeup_time = task->wakeup_time;
 			assert(wakeup_time > std::chrono::steady_clock::time_point{});
 
-			if (!scheduler_queue.add(task, wakeup_time)) {
-				return false;
+			if (auto result = scheduler_queue.add(task, wakeup_time); result != schedule_result::scheduled) {
+				return result;
 			}
 
 			auto next_wakeup_time = atom_next_wakeup_time.load();
@@ -332,12 +342,12 @@ public:
 			} else {
 				L_SCHEDULER("BaseScheduler::" + FOREST_GREEN + "ADDED" + CLEAR_COLOR + " - now:{}, next_wakeup_time:{}, wakeup_time:{}", now, atom_next_wakeup_time.load(), wakeup_time);
 			}
-			return true;
+			return schedule_result::scheduled;
 		}
-		return false;
+		return schedule_result::stopping;
 	}
 
-	bool add(const TaskType& task, std::chrono::steady_clock::time_point wakeup_time) noexcept {
+	schedule_result add(const TaskType& task, std::chrono::steady_clock::time_point wakeup_time) noexcept {
 		auto now = std::chrono::steady_clock::now();
 		if (wakeup_time < now) {
 			wakeup_time = now;

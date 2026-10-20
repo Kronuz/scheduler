@@ -50,6 +50,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(scheduler_test PRIVATE scheduler)
   add_test(NAME scheduler COMMAND scheduler_test)
 
+  # Allocation failure (no_memory). It replaces global operator new and delete,
+  # which the sanitizer runtimes also define, so sanitized builds skip it.
+  if(NOT CMAKE_CXX_FLAGS MATCHES "sanitize")
+    add_executable(scheduler_no_memory_test test/no_memory.cc)
+    target_link_libraries(scheduler_no_memory_test PRIVATE scheduler)
+    add_test(NAME scheduler_no_memory COMMAND scheduler_no_memory_test)
+  endif()
+
   # A runnable tour of the library (not a test): build & run ./build/scheduler_demo
   add_executable(scheduler_demo examples/demo.cc)
   target_link_libraries(scheduler_demo PRIVATE scheduler)

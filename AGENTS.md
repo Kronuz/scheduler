@@ -80,9 +80,13 @@ and exposes the source dir as a `PUBLIC` include. The test target is
 - **`SchedulerQueue`'s wheel geometry is exactly 24 h at 1 ms granularity.** The
   four `StashSlots` levels (`50×1ms`, `10×50ms`, `36×500ms`, `4800×18s`) multiply
   to 86 400 s. Changing a `Div`/`Mod`/`Size` changes the horizon or resolution
-  and the overflow point. `SchedulerQueue::add()` returns stash's false for a
-  task past the horizon and catches `std::bad_alloc`; every `add` is `noexcept`,
-  so keep that catch.
+  and the overflow point. `SchedulerQueue::add()` maps stash's false to
+  `schedule_result::past_horizon` and catches `std::bad_alloc` as `no_memory`;
+  every `add` and `debounce` is `noexcept`, so keep those catches.
+- **A refused debounce leaves nothing pending.** A touch adds its task under the
+  status mutex and erases the key's status on any refusal; a fire-path re-arm
+  that is refused runs the call on the fire thread and releases the key. No
+  `Status` may keep a task that is not on the wheel.
 - **`ScheduledTask::clear()` is a single CAS on `atom_cleared_at`.** First caller
   wins (returns true), the rest lose. The whole cancellation story (and the
   debouncer's per-key collapse) depends on this being atomic and one-shot. Don't

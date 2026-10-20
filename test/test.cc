@@ -123,22 +123,22 @@ static void test_add_result() {
 	static_assert(noexcept(sched.add(std::shared_ptr<InlineTaskBase>{}, std::chrono::steady_clock::now())));
 
 	auto now = std::chrono::steady_clock::now();
-	bool added = sched.add(std::make_shared<OrderTask>(-1), now + 48h);
-	assert(!added && "past-horizon add accepted");
-	added = sched.add(std::make_shared<OrderTask>(7), now + 50ms);
-	assert(added && "normal add refused");
+	auto result = sched.add(std::make_shared<OrderTask>(-1), now + 48h);
+	assert(result == schedule_result::past_horizon && "past-horizon add accepted");
+	result = sched.add(std::make_shared<OrderTask>(7), now + 50ms);
+	assert(result == schedule_result::scheduled && "normal add refused");
 	for (int i = 0; i < 100 && g_inline_ran.load() < 1; ++i) {
 		std::this_thread::sleep_for(20ms);
 	}
 	sched.finish();
-	added = sched.add(std::make_shared<OrderTask>(-2), std::chrono::steady_clock::now() + 10ms);
-	assert(!added && "add during shutdown accepted");
+	result = sched.add(std::make_shared<OrderTask>(-2), std::chrono::steady_clock::now() + 10ms);
+	assert(result == schedule_result::stopping && "add during shutdown accepted");
 	std::this_thread::sleep_for(50ms);
 
 	std::lock_guard<std::mutex> lk(g_order_mtx);
 	assert(g_inline_ran.load() == 1 && g_order.size() == 1 && g_order[0] == 7 && "a refused task fired");
-	(void)added;
-	std::printf("scheduler OK: add() returns true when scheduled, false past the horizon and during shutdown\n");
+	(void)result;
+	std::printf("scheduler OK: add() returns scheduled, past_horizon, stopping\n");
 }
 
 
@@ -458,6 +458,55 @@ static void test_debouncer_rearm() {
 	std::printf("debouncer re-arm OK: 1000 touches held %d argument set(s), 1 call with the last value\n", 1);
 }
 
+// debounce() reports the scheduler's result, and a refused touch leaves nothing
+// pending. A re-arm refused in the fire path (no caller to tell) runs the call
+// once, a little early, and releases the key. Force timeouts of 48 h let a touch
+// move a pending call past the wheel's 24 h horizon.
+static void test_debouncer_refusals() {
+	std::mutex mtx;
+	std::vector<int> calls;
+	auto deb = make_debouncer<int>(
+		"DRF", "DF{:02}", 2,
+		[&](int, int value) {
+			std::lock_guard<std::mutex> lk(mtx);
+			calls.push_back(value);
+		},
+		0ms, 50ms, 50ms, 48h, 48h);
+	static_assert(noexcept(deb.debounce(1, 1, 0)));
+
+	auto result = deb.delayed_debounce(25h, 1, 1, 1);
+	assert(result == schedule_result::past_horizon && "touch past the horizon accepted");
+	assert(deb.pending_keys() == 0 && "a refused touch left the key pending");
+
+	result = deb.debounce(2, 2, 10);
+	assert(result == schedule_result::scheduled);
+	result = deb.delayed_debounce(25h, 2, 2, 11);   // moves the pending call's target past 24 h
+	assert(result == schedule_result::scheduled);
+	for (auto until = std::chrono::steady_clock::now() + 5s; std::chrono::steady_clock::now() < until;) {
+		{
+			std::lock_guard<std::mutex> lk(mtx);
+			if (!calls.empty()) { break; }
+		}
+		std::this_thread::sleep_for(10ms);
+	}
+	std::this_thread::sleep_for(100ms);
+	{
+		std::lock_guard<std::mutex> lk(mtx);
+		assert(calls.size() == 1 && calls[0] == 11 && "refused re-arm did not run the call once");
+	}
+	assert(deb.pending_keys() == 0 && "refused re-arm left the key pending");
+
+	deb.finish();
+	result = deb.debounce(3, 3, 30);
+	assert(result == schedule_result::stopping && "touch during shutdown accepted");
+	assert(deb.pending_keys() == 0 && "a touch refused at shutdown left the key pending");
+	std::this_thread::sleep_for(100ms);
+	std::lock_guard<std::mutex> lk(mtx);
+	assert(calls.size() == 1);
+	(void)result;
+	std::printf("debouncer refusals OK: past_horizon and stopping leave nothing pending; a refused re-arm ran once\n");
+}
+
 int main() {
 	test_inline_scheduler();
 	test_clear_cancels();
@@ -467,6 +516,7 @@ int main() {
 	test_debouncer();
 	test_debouncer_force_window();
 	test_debouncer_rearm();
+	test_debouncer_refusals();
 	test_debouncer_destructor_teardown();
 	std::printf("all scheduler tests passed\n");
 	return 0;

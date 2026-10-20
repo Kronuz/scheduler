@@ -96,7 +96,8 @@ worker pool, and a debounced burst.
 - ❌ Sub-millisecond deadlines or hard real-time: the wheel's resolution is 1 ms
   and tasks run on a regular thread.
 - ❌ Tasks more than 24 hours out: they overflow the wheel. `add` returns
-  false for them (and during shutdown), and they never fire.
+  `schedule_result::past_horizon` for them (`stopping` during shutdown), and they
+  never fire.
 
 ## 📚 Documentation
 
