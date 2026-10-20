@@ -117,8 +117,8 @@ Both derive from `BaseScheduler` and differ only in `operator()(TaskType&)`.
 
 `Debouncer<Key, Func, Tuple, policy>` extends `ThreadedScheduler<DebouncerTask>`
 and keeps a per-key status map (`unordered_map<Key, Status>` under a mutex). Each
-`Status` holds the currently-scheduled `DebouncerTask` for that key and a
-`max_wakeup_time` ceiling.
+`Status` holds the key's one pending `DebouncerTask`, its `max_wakeup_time`
+ceiling, the `target` time the call is due, and the latest arguments.
 
 ### The timing model
 
@@ -131,12 +131,17 @@ and keeps a per-key status map (`unordered_map<Key, Status>` under a mutex). Eac
   result is clamped to never exceed `max_wakeup_time`. So a key that is touched
   forever still fires by the force window. The randomization spreads a thundering
   herd of simultaneously-due keys across time instead of firing them all at once.
-- If a task is already scheduled for the key, the touch replaces it (clearing the
-  old task), keeping the later of the two wakeup times, so the call fires with the
-  latest arguments. A touch never fires a key earlier than it was already due.
+- If a call is already pending for the key, the touch re-arms it in place: it
+  moves `target` to the later of the two times and replaces the arguments, under
+  the status mutex, and adds nothing to the wheel. A touch never fires a key
+  earlier than it was already due, and the call fires with the latest arguments.
 
-When the task fires (`DebouncerTask::operator()`), it calls `throttle(key)` then
-`std::apply(func, args)` with the last-seen arguments. `throttle`:
+When the task fires (`DebouncerTask::operator()`), it takes the status mutex. If
+`target` moved past the task's own `wakeup_time` (a touch re-armed it), it adds a
+fresh task at `target` and returns. Otherwise it takes the arguments and, in the
+same critical section, releases or throttles the key, then runs
+`std::apply(func, args)` outside the lock. Doing both under one lock is what keeps
+a touch from landing between them and being dropped. Releasing or throttling:
 
 - If `throttle_time <= debounce_timeout`, just `release(key)` (erase the status),
   so the next touch starts fresh.
@@ -145,9 +150,12 @@ When the task fires (`DebouncerTask::operator()`), it calls `throttle(key)` then
   throttler fires and `release`s the key, new touches are held back to at least
   the throttler's wakeup time — a post-fire floor on the key's firing rate.
 
-`DebouncerTask` reuses `ScheduledTask`'s cancellation: replacing a key's pending
-task is just `clear()`ing the old one and scheduling a new one; the cleared task
-is skipped when the wheel reaches it.
+A touch never cancels a pending call, so the wheel holds at most one entry per key
+plus one per re-arm, instead of one per touch: cancelled tasks used to stay in the
+wheel with their arguments until their slot drained (`bench/bench_churn.cc`;
+`docs/perf/lazy-rearm.md`). Only a throttler is still cancelled, when a touch turns
+a throttled key back into a pending call; the throttler releases a key only while
+it is still that key's task.
 
 ### Deducing the argument tuple
 

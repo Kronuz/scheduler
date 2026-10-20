@@ -145,8 +145,9 @@ decoupling:
   already.
 
 Since the extraction the logic has diverged in two places: the queue's `clean` is
-walk-based (stash's sentinel frontier), and a debouncer touch always replaces the
-pending call, so the latest arguments win (`e7954f2`). Xapiand now fetches this
+walk-based (stash's sentinel frontier), and a debouncer touch re-arms the pending
+call in place (the latest arguments win, `e7954f2`; no cancel and re-add, see
+`docs/perf/lazy-rearm.md`). Xapiand now fetches this
 library at `main`, so it runs the same code. Keep extraction hygiene separate from behavior
 changes so they can be reconciled with upstream. To restore Xapiand's tracing and
 coloring without editing these files, see "Tracing and coloring" in
