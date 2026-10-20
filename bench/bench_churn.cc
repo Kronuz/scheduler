@@ -6,7 +6,7 @@
 // the key and the arguments) until the walk drains its slot. The bench samples, once
 // a second, the bytes live on the heap, the process RSS, the debouncer tasks alive
 // (one per arguments object), and the calls fired, then stops touching and keeps
-// sampling while the wheel drains.
+// sampling while the wheel drains. At the end it prints the process CPU time.
 //
 //   bench_churn [SECONDS] [RATE] [KEYS] [THREADS] [DRAIN_SECONDS]
 //   bench_churn 30 100000 1000 2 12
@@ -24,6 +24,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <sys/resource.h>
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -167,8 +169,11 @@ int main(int argc, char** argv) {
 		last_touches = tc;
 		last_fired = fc;
 	}
-	std::printf("peak: args alive %lld, heap %.1f MB, RSS %.1f MB; touches %lld, fired %lld\n",
-	            peak_args, peak_live / 1048576.0, peak_rss / 1048576.0, touches.load(), g_fired.load());
+	rusage ru{};
+	getrusage(RUSAGE_SELF, &ru);
+	double cpu = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6 + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
+	std::printf("peak: args alive %lld, heap %.1f MB, RSS %.1f MB; touches %lld, fired %lld; CPU %.2f s\n",
+	            peak_args, peak_live / 1048576.0, peak_rss / 1048576.0, touches.load(), g_fired.load(), cpu);
 	debouncer.reset();
 	return 0;
 }
