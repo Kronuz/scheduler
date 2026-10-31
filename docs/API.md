@@ -15,7 +15,7 @@ CRTP base for a cancellable scheduled task.
 - `add(task)` / `add(task, wakeup_time) -> schedule_result`, `noexcept` —
   schedule (`wakeup_time` clamped to not be in the past; the one-arg form expects
   `task->wakeup_time` already set). Not `[[nodiscard]]`: a caller that ignores the
-  result keeps the old drop-silently behaviour.
+  result drops a refused task silently.
 - `enum class schedule_result : std::uint8_t` — `scheduled` (on the wheel), or
   why a task will never fire: `past_horizon` (more than 24 h out), `stopping`
   (`finish()` began), `no_memory` (the wheel could not allocate).

@@ -108,6 +108,7 @@ worker pool, and a debounced burst.
 - [ARCHITECTURE.md](ARCHITECTURE.md): the wheel, the thread loop, the two runners,
   and the debouncer's timing model.
 - [AGENTS.md](AGENTS.md): repository map, invariants, and traps.
+- [CHANGELOG.md](CHANGELOG.md): behavior changes and their measurements.
 - [examples/colored_trace/](examples/colored_trace/README.md): plugging in colored
   tracing.
 
@@ -123,13 +124,9 @@ arriving at the debouncer's force deadline still delivers its value.
 
 `scheduler_soak [adds] [producers] [idle_ms] [mode]` (built with the tests) is the
 lost-task soak: it adds tasks while the worker alternates between running and sleeping,
-and exits non-zero if any task fails to fire. `mode 1` repeats the burst shape that
-first showed the loss. A short run is a ctest test; run it with 100M adds to soak.
-
-> **Behavior change (fix).** A task could fire up to 30 s late, which looked like a
-> lost task (about one in 60 000 adds in a burst soak), when `add()` landed between the
-> worker's last look at the wheel and its sleep. The worker now looks once more before
-> it sleeps. No API or timing change otherwise. See [ARCHITECTURE.md](ARCHITECTURE.md).
+and exits non-zero if any task fails to fire. `mode 1` adds bursts of 20 000 tasks right
+as the worker goes back to sleep. A short run is a ctest test; run it with 100M adds to
+soak.
 
 ## 🤝 Contributing
 

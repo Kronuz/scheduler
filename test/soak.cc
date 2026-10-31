@@ -3,8 +3,8 @@
 //
 //   scheduler_soak [total_adds=2000000] [producers=1] [idle_ms=2] [mode=0]
 //
-// mode 0: random bursts with short pauses (above). mode 1: the shape of the burst
-// test that first showed the loss: each round lets the worker go back to sleep,
+// mode 0: random bursts with short pauses (above). mode 1: each round lets the
+// worker go back to sleep,
 // parks a far task (5 s) and an earlier one (30 ms), then adds 20000 tasks due now.
 //
 // Prints the number of tasks that never fired (after a grace period far shorter

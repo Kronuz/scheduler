@@ -201,8 +201,8 @@ static void test_threaded_scheduler() {
 
 // ---------------------------------------------------------------------------
 // 2b. ThreadedScheduler: a task cancelled AFTER it was dispatched to the worker
-//     pool, but BEFORE it runs, must NOT fire (regression for the cancelled-
-//     after-dispatch UAF/contract bug).
+//     pool, but BEFORE it runs, must NOT fire (firing it breaks the cancel
+//     contract and can use freed state).
 //
 //     The race is hard to hit by luck, so we force the window: a single-worker
 //     pool is occupied by a blocker task that parks on an atomic gate. While the
@@ -282,12 +282,12 @@ static void test_cancel_after_dispatch() {
 
 // ---------------------------------------------------------------------------
 // 2c. Debouncer: destructs cleanly at scope exit WITHOUT a manual finish(),
-//     while debounced calls are in flight (regression for the shutdown UAF).
+//     while debounced calls are in flight (no use-after-free at shutdown).
 //
 //     The debounced callback touches a heap-allocated counter through a
 //     captured pointer; if the derived Debouncer members were torn down before
 //     the worker/scheduler threads were joined, an in-flight task would read
-//     freed state. A clean run (especially under ASan) exercises the fix.
+//     freed state. A clean run (especially under ASan) shows the join order holds.
 // ---------------------------------------------------------------------------
 
 static void test_debouncer_destructor_teardown() {
@@ -579,8 +579,8 @@ static void test_earlier_task_wakes_sleeper() {
 // The lost task: the worker finishes a pass, peeps (nothing due), and is about to
 // publish its next wakeup. A task added in that window, while the published wakeup
 // time is stale (already past, so add() has nothing to lower) and the worker is not
-// yet asleep (so add() does not signal), used to be missed: the worker then slept
-// its full 30 s idle target with the task due now. It must fire at once.
+// yet asleep (so add() does not signal), must fire at once, not after the worker's
+// full 30 s idle target.
 static std::atomic<int> g_race_ran{0};
 static std::atomic<int> g_arm_on_run{0};   // the next task to run arms the gate: the worker parks right after it
 struct RaceTask;

@@ -107,12 +107,11 @@ queue underneath.
 
 **No lost task (the handshake).** `add()` signals only while the worker is
 `sleeping`, and lowers the published wakeup only when it is later than the task's
-time. That is not enough alone: the published time can be *stale* (already past, or
-earlier than the new task), so `add()` has nothing to lower, and the worker, between its
-`peep` and its sleep, was not yet `sleeping`, so `add()` sends no signal. The worker would
-then publish a fresh 30 s target and sleep through a task that was due now (the task
-fired up to 30 s late, and under load looked lost: about one in 60 000 adds in a
-20 000-task burst soak). The fix is a Dekker pair: `add()` places the task, fences
+time. That alone leaves a window: the published time can be *stale* (already past, or
+earlier than the new task), so `add()` has nothing to lower, and a worker between its
+`peep` and its sleep is not yet `sleeping`, so `add()` sends no signal. The worker would
+then publish a fresh 30 s target and sleep through a task due now. A Dekker pair closes
+the window: `add()` places the task, fences
 (seq_cst) and loads `sleeping`; the worker stores `sleeping`, fences and, under the
 mutex, `peep`s once more before it waits, lowering its target to what it finds. One side
 always sees the other: either `add()` sees `sleeping` and signals under the mutex the
@@ -199,9 +198,9 @@ Releasing or throttling:
   the throttler's wakeup time — a post-fire floor on the key's firing rate.
 
 A touch never cancels a pending call, so the wheel holds at most one entry per key
-plus one per re-arm, instead of one per touch: cancelled tasks used to stay in the
-wheel with their arguments until their slot drained (`bench/bench_churn.cc`;
-`docs/perf/lazy-rearm.md`). Only a throttler is still cancelled, when a touch turns
+plus one per re-arm. A cancelled task stays in the wheel with its arguments until its
+slot drains, so cancelling and re-adding on every touch would keep one dead task per
+touch (`bench/bench_churn.cc`; `docs/perf/lazy-rearm.md`). Only a throttler is cancelled, when a touch turns
 a throttled key back into a pending call; the throttler releases a key only while
 it is still that key's task.
 
@@ -217,10 +216,9 @@ dependencies of its own.
 ## The random helpers
 
 The force window draws from `random_time(min, max)`, a uniform draw over a
-`mt19937_64` seeded from `std::random_device`, kept `thread_local`. `random.cc`
-carries it plus `random_int` and `random_real` (the three helpers the debouncer
-pulls in). Xapiand's `random_string` was left behind because it dragged in
-unrelated Xapiand code.
+`mt19937_64` seeded from `std::random_device`, kept `thread_local`. It comes from
+the [random](https://github.com/Kronuz/random) library (`random.hh`), fetched by
+CMake.
 
 ## Tracing seam
 
@@ -236,9 +234,8 @@ arguments. Because the default macros expand to nothing, the preprocessor
 discards the arguments and the color identifiers are never compiled — so the
 standalone build needs no color stubs at all. Only a trace header that turns the
 macros into real string-building calls (like `examples/colored_trace/trace.h`)
-has to define those nine identifiers. This was verified empirically: the library
-and its test compile clean with `scheduler_trace.h` defining nothing for the
-colors.
+has to define those nine identifiers. The library and its test compile clean with
+`scheduler_trace.h` defining nothing for the colors.
 
 A consumer restores real, colored tracing by pointing `SCHEDULER_TRACE_HEADER` at
 a header that defines the four macros and the nine colors — Xapiand maps them

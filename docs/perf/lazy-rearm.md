@@ -1,6 +1,6 @@
 # Lazy re-arm for the debouncer
 
-Branch `perf/lazy-rearm` from main `fb464cb`. Prototype for review, not merged.
+Measured on branch `perf/lazy-rearm` from main `fb464cb`.
 
 ## Target
 

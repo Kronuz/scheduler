@@ -114,7 +114,7 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   windows generous; never assert a tight race by luck: pin a race with
   `SCHEDULER_TEST_HOOK` (as `test_add_between_peep_and_sleep` does) and soak it with
   `scheduler_soak`. The soak runs one producer under ctest: with two, TSan reports
-  races inside stash's multi-producer `put` (old and new scheduler alike).
+  races inside stash's multi-producer `put`.
 
 ## Traps
 
@@ -142,24 +142,21 @@ and exposes the source dir as a `PUBLIC` include. The test target is
 ## Standalone vs. Xapiand
 
 This is a standalone extraction from
-[Xapiand](https://github.com/Kronuz/Xapiand). The delta from the original is pure
-decoupling:
+[Xapiand](https://github.com/Kronuz/Xapiand). It differs from the original in
+these places:
 
-- `scheduler.h` and `debouncer.h` dropped `#include "log.h"`. The four trace
-  macros (`L_SCHEDULER`, `L_DEBUG_HOOK`, `L_EXC`, `L_CALL`) now resolve through
-  `scheduler_trace.h` (no-op by default). The `stash.h`, `thread.hh`,
-  `threadpool.hh` includes are unchanged but now resolve to the FetchContent'd
-  standalone libraries.
+- `scheduler.h` and `debouncer.h` do not include `log.h`. The four trace macros
+  (`L_SCHEDULER`, `L_DEBUG_HOOK`, `L_EXC`, `L_CALL`) resolve through
+  `scheduler_trace.h` (no-op by default). The `stash.h`, `thread.hh`, and
+  `threadpool.hh` includes resolve to the FetchContent'd standalone libraries.
 - The uniform-random helpers come from the
   [random](https://github.com/Kronuz/random) library, as in Xapiand.
-- `callable_traits.hh` was copied verbatim — it had zero Xapiand dependencies
-  already.
+- `callable_traits.hh` is a verbatim copy; it has no Xapiand dependencies.
+- The queue's `clean` is walk-based (stash's sentinel frontier).
+- A debouncer touch re-arms the pending call in place, and the latest arguments
+  win (no cancel and re-add, see `docs/perf/lazy-rearm.md`).
 
-Since the extraction the logic has diverged in two places: the queue's `clean` is
-walk-based (stash's sentinel frontier), and a debouncer touch re-arms the pending
-call in place (the latest arguments win, `e7954f2`; no cancel and re-add, see
-`docs/perf/lazy-rearm.md`). Xapiand now fetches this
-library at `main`, so it runs the same code. Keep extraction hygiene separate from behavior
-changes so they can be reconciled with upstream. To restore Xapiand's tracing and
-coloring without editing these files, see "Tracing and coloring" in
-[docs/API.md](docs/API.md).
+Xapiand fetches this library at `main`, so it runs the same code. Keep
+extraction hygiene separate from behavior changes so they can be reconciled with
+upstream. To restore Xapiand's tracing and coloring without editing these files,
+see "Tracing and coloring" in [docs/API.md](docs/API.md).
