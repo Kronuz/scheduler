@@ -50,6 +50,13 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(scheduler_test PRIVATE scheduler)
   add_test(NAME scheduler COMMAND scheduler_test)
 
+  # Lost-task soak: a short smoke run under ctest; run it with a large add count (and
+  # under TSan) to soak, e.g. `scheduler_soak 100000000 1 2 1`.
+  add_executable(scheduler_soak test/soak.cc)
+  target_link_libraries(scheduler_soak PRIVATE scheduler)
+  add_test(NAME scheduler_soak COMMAND scheduler_soak 300000 1 2 0)
+  add_test(NAME scheduler_soak_burst COMMAND scheduler_soak 60000 1 2 1)
+
   # Allocation failure (no_memory). It replaces global operator new and delete,
   # which TSan's static runtime also defines (a link clash), so TSan builds skip
   # it; CI passes TSan through the per-config and linker flags.

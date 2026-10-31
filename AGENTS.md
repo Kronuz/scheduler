@@ -12,7 +12,8 @@ scheduler.h                 The timer wheel: ScheduledTask, SchedulerQueue, Base
 debouncer.h                 Debouncer, DebouncerTask, make_(unique_/shared_)debouncer factories. Header.
 callable_traits.hh          Callable introspection (return/args/arity). Copied verbatim from Xapiand; zero deps. Header.
 scheduler_trace.h           No-op L_NOTHING / L_DEBUG_HOOK / L_EXC / L_CALL hooks (stand in for Xapiand's log.h/colors.h).
-test/test.cc                Tests: inline Scheduler order, clear() cancel, ThreadedScheduler, Debouncer collapse and force window.
+test/test.cc                Tests: inline Scheduler order, clear() cancel, ThreadedScheduler, Debouncer collapse and force window, the add-between-peep-and-sleep race (via SCHEDULER_TEST_HOOK).
+test/soak.cc                Lost-task soak (`scheduler_soak`): any task that never fires fails it.
 examples/colored_trace/     Runnable demo that injects a real trace header to restore colored, formatted trace output.
 CMakeLists.txt              STATIC library `scheduler` (+ alias scheduler::scheduler); FetchContents stash + threadpool; CTest test `scheduler`.
 LICENSE                     MIT, Copyright (c) 2015-2019 Dubalu LLC.
@@ -110,7 +111,10 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   `log.h`'s and the colors to `colors.h`. See `examples/colored_trace/`.
 - **Always extend the smoke test.** `test/test.cc` is the only executable check.
   Any behavioral change should grow a corresponding assertion there. Keep timing
-  windows generous; never assert a tight race.
+  windows generous; never assert a tight race by luck: pin a race with
+  `SCHEDULER_TEST_HOOK` (as `test_add_between_peep_and_sleep` does) and soak it with
+  `scheduler_soak`. The soak runs one producer under ctest: with two, TSan reports
+  races inside stash's multi-producer `put` (old and new scheduler alike).
 
 ## Traps
 

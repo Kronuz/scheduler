@@ -121,6 +121,16 @@ cmake -B build && cmake --build build && ctest --test-dir build
 The tests are timing-based with generous windows; they also check that a touch
 arriving at the debouncer's force deadline still delivers its value.
 
+`scheduler_soak [adds] [producers] [idle_ms] [mode]` (built with the tests) is the
+lost-task soak: it adds tasks while the worker alternates between running and sleeping,
+and exits non-zero if any task fails to fire. `mode 1` repeats the burst shape that
+first showed the loss. A short run is a ctest test; run it with 100M adds to soak.
+
+> **Behavior change (fix).** A task could fire up to 30 s late, which looked like a
+> lost task (about one in 60 000 adds in a burst soak), when `add()` landed between the
+> worker's last look at the wheel and its sleep. The worker now looks once more before
+> it sleeps. No API or timing change otherwise. See [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## 🤝 Contributing
 
 Issues and pull requests are welcome. Read [AGENTS.md](AGENTS.md) first: it lists

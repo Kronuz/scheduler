@@ -51,6 +51,15 @@
 using namespace std::chrono_literals;
 
 
+// Test seam: a no-op by default. The tests define it to park the worker at a named
+// point of its loop, which makes the add()/sleep races deterministic. `stale` is true
+// when the worker found nothing pending and its local copy of the published wakeup
+// time still equals the published one, so its next compare-exchange will succeed.
+#ifndef SCHEDULER_TEST_HOOK
+#define SCHEDULER_TEST_HOOK(site, stale) ((void)0)
+#endif
+
+
 // #define L_SCHEDULER L_PRINT
 
 
@@ -309,6 +318,8 @@ public:
 				}
 			}
 
+			SCHEDULER_TEST_HOOK("after_peep", !pending && next_wakeup_time == atom_next_wakeup_time.load());
+
 			// Try setting the worked out wakeup time as the real next wakeup time:
 			if (atom_next_wakeup_time.compare_exchange_strong(next_wakeup_time, wakeup_time)) {
 				if (ending >= 0 && !pending) {
@@ -323,7 +334,21 @@ public:
 			L_DEBUG_HOOK("BaseScheduler::LOOP", "BaseScheduler::" + STEEL_BLUE + "LOOP" + CLEAR_COLOR + " - now:{}, next_wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(atom_next_wakeup_time.load().time_since_epoch()).count());
 			lk.lock();
 			sleeping.store(true);
+			// A task added after the peep above whose add() found nothing to lower (the
+			// published wakeup time was stale, already past or earlier than the task) and
+			// that saw `sleeping` still false would not signal; the worker would then sleep
+			// to a target later than the task is due. The fence pairs with the one in add():
+			// either add() sees `sleeping` and signals under the mutex we hold, or this
+			// peep sees the task.
+			std::atomic_thread_fence(std::memory_order_seq_cst);
 			next_wakeup_time = atom_next_wakeup_time.load();
+			if (auto late = scheduler_queue.peep(next_wakeup_time)) {
+				if (late->wakeup_time < next_wakeup_time) {
+					next_wakeup_time = late->wakeup_time;
+					auto published = atom_next_wakeup_time.load();
+					while (published > next_wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(published, next_wakeup_time)) { }
+				}
+			}
 			if (next_wakeup_time > now) {
 				wakeup_signal.wait_until(lk, next_wakeup_time);
 			}
@@ -360,6 +385,7 @@ public:
 			// next-wakeup reload means a worker that is not yet asleep sees the lowered
 			// wakeup time itself.
 			auto now = std::chrono::steady_clock::now();
+			std::atomic_thread_fence(std::memory_order_seq_cst);   // pairs with the worker's, before it sleeps
 			if (sleeping.load() && (next_wakeup_time >= wakeup_time || next_wakeup_time <= now)) {
 				std::lock_guard<std::mutex> lk(mtx);
 				wakeup_signal.notify_one();

@@ -105,6 +105,21 @@ loop immediately. The mutex is held across the load-then-wait in the loop so an
 `add()` can't slip in between and be lost. One mutex, one condvar, a lock-free
 queue underneath.
 
+**No lost task (the handshake).** `add()` signals only while the worker is
+`sleeping`, and lowers the published wakeup only when it is later than the task's
+time. That is not enough alone: the published time can be *stale* (already past, or
+earlier than the new task), so `add()` has nothing to lower, and the worker, between its
+`peep` and its sleep, was not yet `sleeping`, so `add()` sends no signal. The worker would
+then publish a fresh 30 s target and sleep through a task that was due now (the task
+fired up to 30 s late, and under load looked lost: about one in 60 000 adds in a
+20 000-task burst soak). The fix is a Dekker pair: `add()` places the task, fences
+(seq_cst) and loads `sleeping`; the worker stores `sleeping`, fences and, under the
+mutex, `peep`s once more before it waits, lowering its target to what it finds. One side
+always sees the other: either `add()` sees `sleeping` and signals under the mutex the
+worker holds until it waits, or the worker's second `peep` sees the task. The stale-publish
+window is reproduced deterministically by `test_add_between_peep_and_sleep` (the
+`SCHEDULER_TEST_HOOK` seam parks the worker there) and soaked by `scheduler_soak`.
+
 `end(wait)` sets a countdown that lets the loop drain pending work, then exit.
 
 ### Two run strategies
