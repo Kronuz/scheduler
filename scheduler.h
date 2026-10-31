@@ -236,6 +236,9 @@ class BaseScheduler : public Thread<BaseScheduler<SchedulerImpl, ScheduledTaskIm
 
 	std::condition_variable wakeup_signal;
 	std::atomic<std::chrono::steady_clock::time_point> atom_next_wakeup_time;
+	// True while the worker is inside (or about to enter) the timed wait; add()
+	// signals only then, since an awake worker re-reads the wheel on its next pass.
+	std::atomic<bool> sleeping{false};
 
 	SchedulerQueue<SchedulerImpl, ScheduledTaskImpl, thread_policy> scheduler_queue;
 
@@ -319,10 +322,12 @@ public:
 			// the time we load the next_wakeup_time and we actually start waiting:
 			L_DEBUG_HOOK("BaseScheduler::LOOP", "BaseScheduler::" + STEEL_BLUE + "LOOP" + CLEAR_COLOR + " - now:{}, next_wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(atom_next_wakeup_time.load().time_since_epoch()).count());
 			lk.lock();
+			sleeping.store(true);
 			next_wakeup_time = atom_next_wakeup_time.load();
 			if (next_wakeup_time > now) {
 				wakeup_signal.wait_until(lk, next_wakeup_time);
 			}
+			sleeping.store(false);
 			lk.unlock();
 			L_SCHEDULER("BaseScheduler::" + DODGER_BLUE + "WAKEUP" + CLEAR_COLOR + " - now:{}, wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(wakeup_time.time_since_epoch()).count());
 
@@ -351,8 +356,11 @@ public:
 			auto next_wakeup_time = atom_next_wakeup_time.load();
 			while (next_wakeup_time > wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(next_wakeup_time, wakeup_time)) { }
 
+			// The seq_cst store/load pair with the worker's `sleeping` store and its
+			// next-wakeup reload means a worker that is not yet asleep sees the lowered
+			// wakeup time itself.
 			auto now = std::chrono::steady_clock::now();
-			if (next_wakeup_time >= wakeup_time || next_wakeup_time <= now) {
+			if (sleeping.load() && (next_wakeup_time >= wakeup_time || next_wakeup_time <= now)) {
 				std::lock_guard<std::mutex> lk(mtx);
 				wakeup_signal.notify_one();
 				L_SCHEDULER("BaseScheduler::" + LIGHT_GREEN + "ADDED_NOTIFY" + CLEAR_COLOR + " - now:{}, next_wakeup_time:{}, wakeup_time:{}", now, atom_next_wakeup_time.load(), wakeup_time);

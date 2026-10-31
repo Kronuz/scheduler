@@ -526,11 +526,57 @@ static void test_debouncer_touch_after_finish() {
 	std::printf("debouncer OK: a touch after finish() on a pending key returns stopping\n");
 }
 
+// A producer adding tasks while the worker alternates between running and sleeping:
+// every task fires, and one due earlier than the worker's sleep target fires on
+// time (a skipped signal would leave it waiting out the target).
+static void must(bool ok) {
+	if (!ok) {
+		std::fprintf(stderr, "test_no_lost_wakeup failed\n");
+		std::abort();
+	}
+}
+static std::atomic<int> g_burst_ran{0};
+struct BurstTask;
+using BurstTaskBase = ScheduledTask<Scheduler<BurstTask, ThreadPolicyType::regular>, BurstTask, ThreadPolicyType::regular>;
+struct BurstTask : public BurstTaskBase {
+	using BurstTaskBase::BurstTaskBase;
+	void operator()() { g_burst_ran.fetch_add(1, std::memory_order_relaxed); }
+};
+
+static void test_no_lost_wakeup() {
+	Scheduler<BurstTask, ThreadPolicyType::regular> sched("BURST");
+	constexpr int kEach = 20000;
+	for (int round = 0; round < 20; ++round) {
+		std::this_thread::sleep_for(5ms);   // let the worker go back to sleep
+		auto far = std::make_shared<BurstTask>();
+		auto soon = std::make_shared<BurstTask>();
+		sched.add(far, std::chrono::steady_clock::now() + 5s);
+		auto t0 = std::chrono::steady_clock::now();
+		sched.add(soon, t0 + 30ms);
+		std::this_thread::sleep_for(150ms);
+		must(g_burst_ran.load() == 1);   // `soon` ran, `far` did not
+		g_burst_ran.store(0);
+		far->clear();
+		for (int i = 0; i < kEach; ++i) {
+			sched.add(std::make_shared<BurstTask>(), std::chrono::steady_clock::now());
+		}
+		for (int i = 0; i < 500 && g_burst_ran.load() < kEach; ++i) {
+			std::this_thread::sleep_for(10ms);
+		}
+		must(g_burst_ran.load() == kEach);
+		g_burst_ran.store(0);
+	}
+	sched.finish();
+	std::printf("no lost wakeup OK\n");
+}
+
+
 int main() {
 	test_inline_scheduler();
 	test_clear_cancels();
 	test_add_result();
 	test_threaded_scheduler();
+	test_no_lost_wakeup();
 	test_cancel_after_dispatch();
 	test_debouncer();
 	test_debouncer_force_window();
