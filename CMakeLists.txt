@@ -26,7 +26,7 @@ if(NOT TARGET random::random)
   FetchContent_Declare(
     random
     GIT_REPOSITORY https://github.com/Kronuz/random.git
-    GIT_TAG        6487253c9e7a4855ccbea36f7a66cea5fef7d381
+    GIT_TAG        a6c4f6c1d2d82d03c73f421a624de238edc823c5
   )
   FetchContent_MakeAvailable(random)
 endif()
