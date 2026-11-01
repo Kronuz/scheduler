@@ -91,8 +91,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   if(SCHEDULER_BENCH)
     add_executable(scheduler_bench_churn bench/bench_churn.cc)
     target_link_libraries(scheduler_bench_churn PRIVATE scheduler)
-    # What a producer pays to arm a task: add(), post() and post_ordered().
+    # What a producer pays to arm a task: add(), post() and post_ordered(); --compare adds a
+    # priority_queue + mutex + condition_variable timer queue, after a same-results check that
+    # --check runs alone (the CTest test below).
     add_executable(scheduler_bench_post bench/bench_post.cc)
     target_link_libraries(scheduler_bench_post PRIVATE scheduler)
+    add_test(NAME scheduler_bench_post_check COMMAND scheduler_bench_post --check)
   endif()
 endif()
