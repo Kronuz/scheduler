@@ -16,6 +16,24 @@ CRTP base for a cancellable scheduled task.
   schedule (`wakeup_time` clamped to not be in the past; the one-arg form expects
   `task->wakeup_time` already set). Not `[[nodiscard]]`: a caller that ignores the
   result drops a refused task silently.
+- `post(task, wakeup_time, now) -> schedule_result`, `noexcept` — hand the task to
+  the scheduler thread, which files it into the wheel on its next pass. The caller
+  pays one compare-exchange (no wheel insert, no allocation, no clock read: `now`
+  is its own reading) and signals the thread only when it sleeps past the task.
+  A task cleared before the thread files it never enters the wheel. Tasks posted
+  by one thread, or ordered by anything that orders their posts, fire in that
+  order within a tick. Refusals are `stopping` and `past_horizon`; an allocation
+  failure while filing is the scheduler thread's to handle (it runs a due task,
+  drops the rest), not reported to the caller. Post a task once; do not `add` it too.
+- `post_ordered(task, wakeup_time, now) -> schedule_result`, `noexcept` — `post()` for a caller
+  whose own wakeup times never decrease (a fixed delay after each of its clock readings). The
+  scheduler thread keeps the task in an arrival queue instead of the wheel, which is cheaper for
+  it and avoids the wheel's cost when many tasks fall in one tick, and fires it merged with the
+  wheel by the tick each was filed in and the filing order. Several callers may post ordered
+  tasks; the times can then fall out of order by the gap between a caller's clock reading and
+  its push, and a task behind a later head waits for it, while wheel tasks due between the two
+  pass it (posts that are ordered by anything that orders them, with the same fixed delay, still
+  fire in due order).
 - `enum class schedule_result : std::uint8_t` — `scheduled` (on the wheel), or
   why a task will never fire: `past_horizon` (more than 24 h out), `stopping`
   (`finish()` began), `no_memory` (the wheel could not allocate).

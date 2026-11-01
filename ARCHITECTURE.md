@@ -121,6 +121,69 @@ window is reproduced deterministically by `test_add_between_peep_and_sleep` (the
 
 `end(wait)` sets a countdown that lets the loop drain pending work, then exit.
 
+### `post()`: the hand-off for a hot producer
+
+`add()` does the wheel insert on the caller's thread: an announce, a descent through the
+four levels, a heap box for the value, and shared counters that the worker's walk also
+touches. For a producer that arms a task on every call (the logger) that is most of the
+call. `post()` moves the insert to the worker: the caller pushes the task onto a lock-free
+stack (`posted`, one compare-exchange; the task carries its own link and an owning
+reference, so nothing is allocated) and the worker takes the whole stack with one exchange,
+turns it around, and files the tasks into the wheel oldest first. The wheel then has a
+single inserter, and the order within a tick is the order of the pushes, which is the order
+of anything that orders the posts. A task cleared before it is filed is dropped without a
+wheel entry.
+
+The worker files the stack at the top of each pass (so its `peep` sees the tasks) and
+again after it wakes, before the walk. Before it sleeps it stores `sleeping` and reads
+`posted` under the mutex (the same Dekker pair as `add()`: the poster pushes, then loads
+`sleeping`; the worker stores `sleeping`, then reads `posted`, all seq_cst, so one side
+sees the other); a task found there makes it skip the wait and go round, filing it after
+it unlocks, because filing can run task code (the destructor of a task cleared before it
+was filed, a task the wheel refused) and a task that posts takes the mutex. A poster also
+lowers the published wakeup time to its task's when that is earlier, which carries the wake
+for most tasks, but not when there is nothing to lower (the worker woke by timeout, so the
+published time is already past, and the task is posted before the worker raises it): then
+only the pair saves the task from sleeping to the worker's idle target (`peep_sleep_stale`
+is the check). A poster signals only when the worker sleeps past the task (or
+its target has passed), and the first poster in a sleep sets `wake_requested` so a burst of
+posts sends one signal; the worker clears it each time it goes to sleep.
+
+**The arrival queue.** A caller that arms a task on every call for a fixed delay (the
+logger's lines, due 1 ms after each call) posts them with `post_ordered()`: each poster's wakeup
+times never decrease, so the worker keeps them in a plain queue in filing order and never inserts
+them into the wheel. Across posters the times can fall out of order by the gap between a poster's
+clock reading and its push; the queue then holds a task behind a later head, and wheel tasks due
+between the two pass it. Posts ordered by anything that orders them, with wakeups of the
+poster's clock plus one fixed delay, still fire in due order, because everything ahead of such a
+task was pushed before it and is due no later than the delay after its push (`test_ordered_posters`
+checks it with posters that read the clock, wait, and push). That matters when many fall in one tick: a wheel slot is a chain of 10-entry
+chunks that an insert walks from the head, so thousands of tasks in one 1 ms slot cost thousands of
+hops each. (A first version filed every posted task into the wheel: a burst of 50 000 log lines then
+drained at 8 us per line instead of 0.5, with one 21 ms stall while the worker filed 12 000 overdue
+lines into one slot. The queue removed it.) The queue and the wheel fire merged:
+`fire_due()` runs whichever of the wheel's next due task and the queue's head comes first by (tick,
+filing order), which is the order the wheel alone would give. The tick is the one the task is filed
+in, and a task already overdue when the worker files it lands at the floor of the wheel's last walk
+(stash files any key below that floor there), so the worker records that tick (`ingest_tick`) as it
+files a task, for the queue's tasks as well as the wheel's. (Ordering by the due time instead lets a
+queue task overtake a wheel task posted before it whenever the worker has been busy, because the wheel
+has by then moved the earlier task up to the floor: `mixed_order(true)` is the check.) It reads `limit` (the time) before it
+walks the wheel, so a walk that finds nothing means nothing on the wheel is due before `limit` and
+the queue's due tasks can run without another walk (it walks again every 256). The worker's wakeup
+target is the queue's head when that is sooner than the wheel's next task.
+
+`finish()` closes the stack, whichever way the worker's loop ends. When it finds nothing due
+and `finish()` has begun it swaps a closed mark into `posted`, files what it held, and goes
+round again if there was any; when the countdown reaches zero it does the same after the loop,
+then runs what is due. A `post()` that passed its `stopping` check before `finish()` and
+pushes after the close sees the mark and is refused (`stopping`); one that pushed before it
+is filed, and runs if due or is released with the wheel. A task is never left on the stack,
+where it owns itself and nothing frees it. `finish_exit_none`, `finish_exit_countdown` and `finish_exit_zero` hold a poster between its
+check and its push (`SCHEDULER_PUSH_HOOK`) and ends the worker by each exit; `test_finish_race`
+(200 rounds, three posters) checks that every accepted task runs and none is run twice, but
+its race window is a few nanoseconds wide and it does not by itself tell the exits apart.
+
 ### Two run strategies
 
 `Scheduler<Impl, policy>` runs each due task **inline** on the scheduler thread:

@@ -3,6 +3,28 @@
 All notable changes to `scheduler` are recorded here, newest first. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 2026-10-31 (producer hand-off)
+
+### Added
+
+- `post(task, wakeup_time, now)` and `post_ordered(task, wakeup_time, now)`: a producer hands a
+  task to the scheduler thread with one compare-exchange onto a lock-free stack, instead of
+  inserting it into the wheel on its own thread. The caller allocates nothing and reads no
+  clock (`now` is its own reading); it signals the thread only when the thread sleeps past the
+  task, and once per sleep however many tasks it posts. The scheduler thread files the tasks:
+  `post()` ones into the wheel (so the wheel has one inserter and the order within a tick is the
+  posting order), `post_ordered()` ones, for callers whose own wakeup times never decrease, into
+  an arrival queue that it merges with the wheel by tick and filing order and never puts on the
+  wheel. A task cleared before it is filed never enters the wheel. `finish()` closes the stack on every
+  exit of the worker loop, so a task posted as it begins is refused, run or released, never left
+  holding itself on the stack. On an Apple M1 Pro one producer
+  pays 57 ns per task for `post()` and 56 ns for `post_ordered()` against 367 ns for `add()`
+  (the task's own allocation is about 50 ns of each; `bench/bench_post.cc`). `add()` and the
+  rest of the API are unchanged.
+- `test/post.cc`: order from one thread and across threads, mixed delays against the wheel's
+  due-order oracle, cancel, wake, horizon, four producers, and a `finish()` that races three
+  posters over 200 rounds (2 million accepted tasks, all run, none twice).
+
 ## 2026-10-31
 
 ### Fixed
