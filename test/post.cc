@@ -373,11 +373,10 @@ static void test_producers() {
 		threads.emplace_back([&, t] {
 			for (int k = 0; k < kPer; ++k) {
 				keep[t].push_back(make(sink, t * kPer + k));
-				// Due times spread over 1 s, in the future: a wheel slot is a chain that the worker walks from its
-				// head for every task it files, and an overdue task is filed at the wheel's floor, so a backlog due
-				// within a few ms of now lands in one slot and costs the worker quadratic time (a TSan build took
-				// more than 30 s on 200000 such tasks).
-				CHECK(post_at(sched, keep[t].back(), std::chrono::steady_clock::now() + 100ms + (k % 1000) * 1ms) == schedule_result::scheduled);
+				// Due within 2 ms: a worker slower than the posters (a TSan build) files most of them overdue,
+				// all into the leaf at the wheel's floor, whose chain each insert resumes at the furthest node
+				// claimed (stash's claim hint; walked from the head, the backlog cost quadratic time).
+				CHECK(post_at(sched, keep[t].back(), std::chrono::steady_clock::now() + (k % 2) * 1ms) == schedule_result::scheduled);
 			}
 		});
 	}
@@ -399,7 +398,7 @@ static void test_producers() {
 // finish() racing posters: a task accepted is run (it is due now), one refused is not.
 static void test_finish_race() {
 	// Half the tasks are post()ed due now, which are overdue by the time the worker files them and land in
-	// one wheel slot (a chain walked for each): keep the count where TSan builds finish quickly.
+	// the wheel's floor slot; 200 rounds of 6000 keep TSan builds quick.
 	constexpr int kPerPoster = 2000;
 	long accepted_total = 0, fired_total = 0;
 	std::chrono::milliseconds slowest{0};

@@ -156,8 +156,10 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   Any behavioral change should grow a corresponding assertion there. Keep timing
   windows generous; never assert a tight race by luck: pin a race with
   `SCHEDULER_TEST_HOOK` (as `test_add_between_peep_and_sleep` does) and soak it with
-  `scheduler_soak`. The soak runs one producer under ctest: with two, TSan reports
-  races inside stash's multi-producer `put`.
+  `scheduler_soak`. ctest runs the soak with one producer and with three
+  (`scheduler_soak_producers`). A TSan from LLVM 12 or older reports races inside
+  stash's insert with two or more producers that are not there: it ignores a failed
+  compare-exchange's acquire (stash's AGENTS.md, Traps); use a newer one.
 
 ## Traps
 

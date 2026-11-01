@@ -8,11 +8,11 @@ include(FetchContent)
 #   stash       — the lock-free hierarchical slot store (the timer-wheel primitive)
 #   threadpool  — Thread<Impl,policy> + ThreadPolicyType + ThreadPool (+ TaskQueue)
 # Both are public (consumers see stash.h / thread.hh / threadpool.hh on their
-# include path), tracking their default-branch tips.
+# include path), pinned by commit.
 FetchContent_Declare(
   stash
   GIT_REPOSITORY https://github.com/Kronuz/stash.git
-  GIT_TAG        351ef2e0fb69c3648eb1e33439ced4a50443200b
+  GIT_TAG        78a18f3162de8d482fa2e3c480d1a3e9cf862537
 )
 FetchContent_Declare(
   threadpool
@@ -56,6 +56,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(scheduler_soak PRIVATE scheduler)
   add_test(NAME scheduler_soak COMMAND scheduler_soak 300000 1 2 0)
   add_test(NAME scheduler_soak_burst COMMAND scheduler_soak 60000 1 2 1)
+  # Three producers on one wheel: stash's concurrent insert under the sanitizers.
+  add_test(NAME scheduler_soak_producers COMMAND scheduler_soak 150000 3 2 0)
 
   # post(): the lock-free hand-off from producer threads to the worker (order, cancel,
   # wake, many producers, a finish() that races the posters).

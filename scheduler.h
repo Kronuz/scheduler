@@ -655,8 +655,7 @@ public:
 
 	// post() for a caller whose own posts carry nondecreasing wakeup times (a log line due a
 	// fixed delay after each call, say). The worker keeps them in an arrival queue and never
-	// puts them on the wheel, which costs it a fraction of an insert and, when many tasks fall
-	// in one tick, avoids the wheel's cost of a slot with a long chain. They fire at the times
+	// puts them on the wheel, which costs it a fraction of an insert. They fire at the times
 	// and in the order the wheel would have fired them: tasks in one tick together, by the
 	// order filed, merged with the wheel's own tasks by the tick each was filed in. The worker
 	// waits on the queue's oldest task. Across posters the times may fall out of order, by the

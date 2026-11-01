@@ -167,11 +167,9 @@ clock reading and its push; the queue then holds a task behind a later head, and
 between the two pass it. Posts ordered by anything that orders them, with wakeups of the
 poster's clock plus one fixed delay, still fire in due order, because everything ahead of such a
 task was pushed before it and is due no later than the delay after its push (`test_ordered_posters`
-checks it with posters that read the clock, wait, and push). That matters when many fall in one tick: a wheel slot is a chain of 10-entry
-chunks that an insert walks from the head, so thousands of tasks in one 1 ms slot cost thousands of
-hops each. (A first version filed every posted task into the wheel: a burst of 50 000 log lines then
-drained at 8 us per line instead of 0.5, with one 21 ms stall while the worker filed 12 000 overdue
-lines into one slot. The queue removed it.) The queue and the wheel fire merged:
+checks it with posters that read the clock, wait, and push). The queue costs the worker a deque push
+where the wheel costs an insert: a descent through four levels, a heap box for the value, and an
+announce. The queue and the wheel fire merged:
 `fire_due()` runs whichever of the wheel's next due task and the queue's head comes first by (tick,
 filing order), which is the order the wheel alone would give. The tick is the one the task is filed
 in, and a task already overdue when the worker files it lands at the floor of the wheel's last walk

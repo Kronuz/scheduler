@@ -28,6 +28,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   920 / 884 ns before, 839 / 849 now. `post()` and `post_ordered()` with one producer stay
   at 20 to 22 ns. `busy_pass` (`test/post.cc`) fails if a pass with a task due takes the
   sleep path.
+- The stash pin moves to 78a18f3, whose leaf inserts resume their chain walk at the furthest
+  node claimed instead of the leaf's head (LPH-R10). Every task due in one 1 ms slot, and
+  every overdue task (filed at the wheel's floor), shares one leaf, so a burst or a backlog
+  cost the inserting thread quadratic time: a TSan build of `producers` (`test/post.cc`, four
+  threads posting 200 000 tasks due within 2 ms) timed out at 30 s in 3 of 5 runs on a loaded
+  Linux VM and now runs in 4.1 to 4.8 s (10 of 10); the test is back to that shape. One
+  producer's `add()` of tasks due now: 390 / 424 ns before, 224 / 252 ns now (Apple M4 Pro,
+  as above); due in 1 ms: 319 / 321 ns before, 149 / 149 now; four producers, due now:
+  839 / 849 ns before, 628 / 626 now.
+- ctest runs the soak with three producers too (`scheduler_soak_producers`).
 
 ## 2026-10-31 (producer hand-off)
 
