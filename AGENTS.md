@@ -16,6 +16,7 @@ test/test.cc                Tests: inline Scheduler order, clear() cancel, Threa
 test/soak.cc                Lost-task soak (`scheduler_soak`): any task that never fires fails it.
 test/post.cc                post() and post_ordered(): order (one thread, across threads, mixed delays against the wheel's oracle), cancel, wake, horizon, many producers, finish() racing the posters.
 test/handshake_model.cc     add()'s side of the sleep handshake, read from scheduler.h, against a store-buffer model of the worker's pass.
+test/no_memory.cc           Allocation failure (`scheduler_no_memory`): add() and debounce() report it; a refused block in the worker's arrival queue runs a due task, drops the others and leaves the worker running. Not built under TSan (it replaces operator new).
 bench/bench_post.cc         What a producer pays to arm a task: add(), post(), post_ordered() (`SCHEDULER_BENCH`).
 examples/colored_trace/     Runnable demo that injects a real trace header to restore colored, formatted trace output.
 CMakeLists.txt              STATIC library `scheduler` (+ alias scheduler::scheduler); FetchContents stash + threadpool; CTest test `scheduler`.

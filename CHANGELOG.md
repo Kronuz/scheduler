@@ -3,6 +3,19 @@
 All notable changes to `scheduler` are recorded here, newest first. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 2026-11-01
+
+### Tests
+
+- `test/no_memory.cc` covers an allocation failure in the worker's arrival queue
+  (`arrivals.push_back`, review LPH-R6), which the `post_ordered()` path files into. It
+  measures how a `std::deque` of the queue's element type takes a new block (libc++ at the
+  first `push_back`, libstdc++ at the 32nd), posts that many ordered tasks, and refuses the
+  block the worker asks for when it files the last one. A due task runs, one due 500 ms
+  later is dropped and released, and a task posted afterwards runs, so the worker survives.
+  Without the handler around the `push_back`, the exception ended the worker's thread and
+  the due task never ran: the test fails on that header.
+
 ## 2026-10-31 (audit fixes)
 
 ### Fixed

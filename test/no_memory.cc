@@ -1,10 +1,14 @@
 // no_memory: allocation failure inside the wheel or a debouncer touch is reported,
-// not thrown, and leaves nothing pending. It replaces global operator new to fail
-// on demand; TSan's static runtime defines it too and the link clashes, so CMake
-// skips this test in TSan builds (it runs under ASan+UBSan).
+// not thrown, and leaves nothing pending; one inside the worker's arrival queue runs
+// the task being filed if it is due, drops it otherwise, and leaves the worker
+// running. It replaces global operator new to fail on demand; TSan's static runtime
+// defines it too and the link clashes, so CMake skips this test in TSan builds (it
+// runs under ASan+UBSan).
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <string>
@@ -20,10 +24,21 @@ using namespace std::chrono_literals;
 static thread_local bool t_fail = false;
 // Fails the next allocation of exactly this many bytes, on any thread; 0 = off.
 static std::atomic<std::size_t> g_fail_size{0};
+// Counts the allocations this thread makes while set, and keeps the sizes of the first 32
+// (an array: recording must not allocate).
+static thread_local bool t_record = false;
+static thread_local int t_recorded = 0;
+static thread_local std::size_t t_sizes[32];
 
 static void* allocate(std::size_t n) {
 	if (t_fail) {
 		throw std::bad_alloc();
+	}
+	if (t_record) {
+		if (t_recorded < 32) {
+			t_sizes[t_recorded] = n;
+		}
+		++t_recorded;
 	}
 	if (auto size = g_fail_size.load(std::memory_order_relaxed); size == n &&
 	    g_fail_size.compare_exchange_strong(size, 0)) {
@@ -70,6 +85,87 @@ static std::atomic<int> g_ran{0};
 struct CountTask : public ScheduledTask<Sched, CountTask, ThreadPolicyType::regular> {
 	void operator()() { g_ran.fetch_add(1); }
 };
+
+// How the worker's arrival queue (a std::deque of shared_ptr) gets a new block: the size of the
+// largest request, and the number of push_backs after construction that makes it. libc++
+// allocates at the first push_back, libstdc++ at construction and at every 32nd push_back.
+struct ArrivalsBlock {
+	std::size_t size = 0;
+	int pushes = 0;
+};
+
+static ArrivalsBlock arrivals_block() {
+	t_recorded = 0;
+	t_record = true;
+	std::deque<std::shared_ptr<CountTask>> probe;   // the construction itself may allocate
+	const int mark = t_recorded;
+	ArrivalsBlock block;
+	while (t_recorded == mark && block.pushes < 4096) {
+		probe.push_back(nullptr);
+		++block.pushes;
+	}
+	t_record = false;
+	for (int i = mark; i < t_recorded && i < 32; ++i) {
+		if (t_sizes[i] > block.size) {
+			block.size = t_sizes[i];
+		}
+	}
+	return block;
+}
+
+static bool wait_until(auto&& done, std::chrono::milliseconds limit) {
+	for (auto until = std::chrono::steady_clock::now() + limit; std::chrono::steady_clock::now() < until;) {
+		if (done()) {
+			return true;
+		}
+		std::this_thread::sleep_for(2ms);
+	}
+	return done();
+}
+
+// An allocation failure in the worker's arrival queue (LPH-R6), when the task being filed is due and
+// when it is not. A refused wheel insert is handled the same way: a due task runs, any other is
+// dropped, and the worker goes on. Without the handler the exception left the worker's loop, the
+// thread ended, and every later post() returned `scheduled` and never ran.
+static void test_arrivals_no_memory(bool due) {
+	const ArrivalsBlock block = arrivals_block();
+	CHECK(block.size != 0 && block.pushes >= 1);
+
+	Sched sched("ARRIVALS");
+	std::this_thread::sleep_for(30ms);
+	g_ran = 0;
+
+	// Fill the queue up to the push that needs a new block; each of these tasks is due and runs.
+	for (int i = 1; i < block.pushes; ++i) {
+		auto task = std::make_shared<CountTask>();
+		auto now = std::chrono::steady_clock::now();
+		CHECK(sched.post_ordered(task, now, now) == schedule_result::scheduled);
+		CHECK(wait_until([&] { return g_ran.load() == i; }, 2s));
+	}
+	const int before = g_ran.load();
+
+	auto victim = std::make_shared<CountTask>();
+	auto after = std::make_shared<CountTask>();
+	auto now = std::chrono::steady_clock::now();
+	const auto late = now + 500ms;
+	g_fail_size = block.size;   // the worker's push_back of `victim` asks for a new block and is refused
+	CHECK(sched.post_ordered(victim, due ? now : late, now) == schedule_result::scheduled);
+	CHECK(wait_until([&] { return g_fail_size.load() == 0; }, 2s));   // the failure landed
+	if (due) {
+		CHECK(wait_until([&] { return g_ran.load() == before + 1; }, 2s));   // it ran, at once
+	} else {
+		std::this_thread::sleep_for(800ms);   // well past its time
+		CHECK(g_ran.load() == before);          // dropped: it never runs
+		CHECK(victim.use_count() == 1);         // and the scheduler holds no reference to it
+	}
+
+	// The worker is still working: a task posted after the failure is filed and runs.
+	now = std::chrono::steady_clock::now();
+	CHECK(sched.post_ordered(after, due ? now : now + 100ms, now) == schedule_result::scheduled);
+	CHECK(wait_until([&] { return g_ran.load() == before + (due ? 2 : 1); }, 2s));
+	sched.finish();
+	CHECK(g_ran.load() == before + (due ? 2 : 1));
+}
 
 int main() {
 	// The wheel's first insert allocates its top chunk: no_memory, nothing fires.
@@ -162,6 +258,11 @@ int main() {
 		CHECK(elapsed < 350ms);           // ran at the early fire, not at the target
 	}
 
-	std::printf("no_memory OK: add and debounce report it and leave nothing pending\n");
+	// An allocation failure in the worker's arrival queue: a due task runs, any other is dropped,
+	// and the worker keeps working.
+	test_arrivals_no_memory(true);
+	test_arrivals_no_memory(false);
+
+	std::printf("no_memory OK: add and debounce report it and leave nothing pending; the worker survives it in its arrival queue\n");
 	return 0;
 }
