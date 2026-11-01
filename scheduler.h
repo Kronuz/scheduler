@@ -30,6 +30,7 @@
 #include <deque>                  // for std::deque
 #include <memory>
 #include <mutex>                  // for std::condition_variable, std::mutex
+#include <new>                    // for placement new
 #include <string>                 // for std::string
 #include <utility>                // for std::move
 
@@ -113,16 +114,41 @@ protected:
 	// BEFORE it runs, does not fire — honoring "if it hasn't run yet, it never
 	// will." See ScheduledTask::operator()/cancelled() and ThreadedScheduler.
 	std::atomic_bool atom_cancelled;
-
-	// The hand-off of BaseScheduler::post(): while the task waits for the worker to
-	// file it into the wheel, the link to the task posted before it and the owning
-	// reference the hand-off holds. Written by the poster before it publishes the task
-	// and by the worker after it takes the task; no other code touches them.
-	ScheduledTask* post_next = nullptr;
-	std::shared_ptr<ScheduledTask> post_hold;
 	bool post_ordered = false;           // post_ordered(): kept in the arrival queue, not the wheel
-	std::uint64_t ingest_seq = 0;        // the worker's count of tasks filed, to merge the queue with the wheel
-	unsigned long long ingest_tick = 0;  // the tick the task was filed in (its due tick, or the wheel's floor if overdue)
+
+	// The two stages of a post()ed task never overlap, so they share these 24 bytes.
+	// While the task waits on the stack: the link to the task posted before it and the
+	// reference the hand-off holds on it, written by the poster before it publishes the
+	// task and by the worker after it takes it. Once the worker has filed it: its filing
+	// number, to merge the arrival queue with the wheel, and the tick it was filed in (its
+	// due tick, or the wheel's floor if overdue). Both read zero in a task that was never
+	// posted. No other code touches them.
+	union Hand {
+		struct Posted {
+			ScheduledTask* next;
+			std::shared_ptr<ScheduledTask> hold;
+		} posted;
+		struct Filed {
+			std::uint64_t seq;
+			unsigned long long tick;
+		} filed;
+
+		Hand() noexcept : filed{0, 0} {}
+		~Hand() {}   // a posted task holds itself, so it is never destroyed while `hold` is set
+	} hand;
+
+	// Begins the posted stage, holding `task` (itself) until the worker takes it.
+	void begin_posted(std::shared_ptr<ScheduledTask> task) noexcept {
+		::new (static_cast<void*>(&hand.posted)) typename Hand::Posted{nullptr, std::move(task)};
+	}
+
+	// Ends the posted stage: returns the hold and leaves the filed stage, zeroed.
+	std::shared_ptr<ScheduledTask> end_posted() noexcept {
+		std::shared_ptr<ScheduledTask> task = std::move(hand.posted.hold);
+		hand.posted.~Posted();
+		::new (static_cast<void*>(&hand.filed)) typename Hand::Filed{0, 0};
+		return task;
+	}
 
 public:
 	ScheduledTask(std::chrono::steady_clock::time_point created_at = std::chrono::steady_clock::now()) :
@@ -170,7 +196,8 @@ public:
 
 template <typename SchedulerImpl, typename ScheduledTaskImpl, ThreadPolicyType thread_policy>
 class SchedulerQueue {
-	using TaskType = std::shared_ptr<ScheduledTask<SchedulerImpl, ScheduledTaskImpl, thread_policy>>;
+	using Base = ScheduledTask<SchedulerImpl, ScheduledTaskImpl, thread_policy>;
+	using TaskType = std::shared_ptr<Base>;
 
 public:
 	static unsigned long long now() {
@@ -195,8 +222,41 @@ public:
 	}
 
 private:
+	// What a slot holds: the reference that keeps a task alive until it fires. The walk takes a
+	// value out of its slot with `*out = *slot` and deletes the slot's box right after, so for a
+	// Held that assignment moves the reference out: a fired task costs no reference-count round
+	// trip. A peep leaves the value in its slot and reads it through Peeked, which copies a
+	// pointer. The walk's liveness test is `*held && **held`.
+	struct Held {
+		TaskType task;
+
+		template <typename T>
+		explicit Held(const std::shared_ptr<T>& task) noexcept : task(task) {}
+		template <typename T>
+		explicit Held(std::shared_ptr<T>&& task) noexcept : task(std::move(task)) {}
+
+		explicit operator bool() const noexcept {
+			return static_cast<bool>(task);
+		}
+		Base& operator*() const noexcept {
+			return *task;
+		}
+		operator TaskType() noexcept {
+			return std::move(task);
+		}
+	};
+
+	struct Peeked {
+		Base* task = nullptr;
+
+		Peeked& operator=(Held& held) noexcept {
+			task = held.task.get();
+			return *this;
+		}
+	};
+
 	/*                               <  _Tp        _Size       _Div         _Mod  >*/
-	using _tasks =        StashValues<TaskType,    10ULL>;
+	using _tasks =        StashValues<Held,        10ULL>;
 	using _50_1ms =       StashSlots<_tasks,       10ULL,       1ULL * MS,    50ULL>;
 	using _10_50ms =      StashSlots<_50_1ms,      10ULL,      50ULL * MS,    10ULL>;
 	using _36_500ms =     StashSlots<_10_50ms,     12ULL,     500ULL * MS,    36ULL>;
@@ -211,20 +271,24 @@ public:
 		ctx(now()),
 		cctx(now()) { }
 
-	TaskType peep(std::chrono::steady_clock::time_point end_time) noexcept {
+	// The first live task due before `end_time`, still in the wheel (its slot holds the
+	// reference, so the pointer stays valid until the worker walks it out), or null.
+	Base* peep(std::chrono::steady_clock::time_point end_time) noexcept {
 		ctx.op = StashContext::Operation::peep;
 		ctx.begin_key = ctx.atom_first_valid_key.load();
 		ctx.end_key = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time.time_since_epoch()).count();;
-		TaskType task;
-		queue.next(ctx, &task);
-		return task;
+		Peeked peeked;
+		queue.next(ctx, &peeked);
+		return peeked.task;
 	}
 
-	TaskType walk() noexcept {
+	// The next live task whose slot began before `end` (nanoseconds), taken out of the wheel,
+	// or an empty pointer. The caller reads the clock, once for as many walks as it likes.
+	TaskType walk(unsigned long long end) noexcept {
 		ctx.op = StashContext::Operation::walk;
 		ctx.pending_floor = StashContext::IDLE;   // fresh per walk: caps first_valid at any pending leaf
 		ctx.begin_key = ctx.atom_first_valid_key.load();
-		ctx.end_key = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		ctx.end_key = end;
 		TaskType task;
 		queue.next(ctx, &task);
 		return task;
@@ -257,19 +321,27 @@ public:
 		return static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count()) < queue.horizon(ctx);
 	}
 
-	schedule_result add(const TaskType& task, std::chrono::steady_clock::time_point time_point) noexcept {
+	// A pointer to a derived task is copied once, into the slot's box.
+	template <typename T>
+	schedule_result add(const std::shared_ptr<T>& task, std::chrono::steady_clock::time_point time_point) noexcept {
 		return place(task, time_point);
 	}
 
 	// The same, moving the reference into the wheel (a refusal leaves `task` intact).
-	schedule_result add(TaskType&& task, std::chrono::steady_clock::time_point time_point) noexcept {
+	template <typename T>
+	schedule_result add(std::shared_ptr<T>&& task, std::chrono::steady_clock::time_point time_point) noexcept {
 		return place(std::move(task), time_point);
 	}
 
 private:
-	template <typename Task>
-	schedule_result place(Task&& task, std::chrono::steady_clock::time_point time_point) noexcept {
-		switch (queue.add(ctx, std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count(), std::forward<Task>(task))) {
+	template <typename Ref>
+	schedule_result place(Ref&& task, std::chrono::steady_clock::time_point time_point) noexcept {
+		// The wheel files a task by the finest slot its time falls in and fires it once that slot
+		// has begun, so it is given the slot's start: a producer then widens the wheel's
+		// valid-key bound (a compare-exchange on a line the walk reads) once per slot, not once
+		// per task. The slot, the floor's clamp and the horizon (a multiple of the coarsest slot)
+		// are the same for the start as for the time.
+		switch (queue.add(ctx, tick_start(time_point), std::forward<Ref>(task))) {
 			case stash_result::placed:
 				return schedule_result::scheduled;
 			case stash_result::past_horizon:
@@ -340,24 +412,23 @@ class BaseScheduler : public Thread<BaseScheduler<SchedulerImpl, ScheduledTaskIm
 		// The stack is newest first: reverse it.
 		Task* oldest = nullptr;
 		while (head != nullptr) {
-			auto next = head->post_next;
-			head->post_next = oldest;
+			auto next = head->hand.posted.next;
+			head->hand.posted.next = oldest;
 			oldest = head;
 			head = next;
 		}
 		bool filed = false;
 		while (oldest != nullptr) {
-			auto next = oldest->post_next;
-			TaskType task = std::move(oldest->post_hold);   // `oldest` may be freed once this goes out of scope
-			oldest->post_next = nullptr;
+			auto next = oldest->hand.posted.next;
+			TaskType task = oldest->end_posted();   // `oldest` may be freed once this goes out of scope
 			oldest = next;
 			if (!*task) {
 				continue;   // cancelled before it was filed
 			}
-			task->ingest_seq = ++filed_count;
+			task->hand.filed.seq = ++filed_count;
 			// The tick the wheel files it in (an overdue task lands at the floor of the last walk,
 			// and the queue must order it as the wheel would).
-			task->ingest_tick = scheduler_queue.filing_tick(task->wakeup_time);
+			task->hand.filed.tick = scheduler_queue.filing_tick(task->wakeup_time);
 			auto wakeup_time = task->wakeup_time;
 			if (task->post_ordered) {
 				try {
@@ -389,20 +460,29 @@ class BaseScheduler : public Thread<BaseScheduler<SchedulerImpl, ScheduledTaskIm
 	// filed. A task put on the wheel with add() has no filing tick recorded; its due tick stands.
 	static bool before(const Task& a, const Task& b) noexcept {
 		using Queue = SchedulerQueue<SchedulerImpl, ScheduledTaskImpl, thread_policy>;
-		auto ta = a.ingest_tick ? a.ingest_tick : Queue::tick_start(a.wakeup_time);
-		auto tb = b.ingest_tick ? b.ingest_tick : Queue::tick_start(b.wakeup_time);
-		return ta != tb ? ta < tb : a.ingest_seq < b.ingest_seq;
+		auto ta = a.hand.filed.tick ? a.hand.filed.tick : Queue::tick_start(a.wakeup_time);
+		auto tb = b.hand.filed.tick ? b.hand.filed.tick : Queue::tick_start(b.wakeup_time);
+		return ta != tb ? ta < tb : a.hand.filed.seq < b.hand.filed.seq;
 	}
 
 	// Runs what is due: the wheel's due tasks and the due head of the arrival queue, merged in
 	// the order `before` gives, which is the order every task would have had on the wheel.
 	// `limit` is read before the wheel is walked, so a walk that finds nothing means no wheel
 	// task is due before `limit`, and the queue's tasks due before `limit` can run without
-	// looking at the wheel again (the wheel is walked again every 256 of them).
+	// looking at the wheel again (the wheel is walked again every 256 of them). One reading
+	// serves every walk until it is refreshed, after 16 wheel tasks or 256 queue tasks: a task
+	// that falls due meanwhile is left for the worker's next pass, which starts at once.
 	void fire_due() {
 		using Queue = SchedulerQueue<SchedulerImpl, ScheduledTaskImpl, thread_policy>;
 		unsigned long long limit = Queue::now();
-		TaskType held = scheduler_queue.walk();
+		if (arrivals.empty()) {
+			// Only ingest() fills the queue, and the worker is the one calling it: no task run
+			// from here can put anything in it, so the wheel's order is the only order.
+			fire_wheel(limit);
+			return;
+		}
+		TaskType held = scheduler_queue.walk(limit);
+		unsigned fired_from_wheel = 0;
 		unsigned fired_from_queue = 0;
 		for (;;) {
 			if (held) {
@@ -413,19 +493,51 @@ class BaseScheduler : public Thread<BaseScheduler<SchedulerImpl, ScheduledTaskIm
 				} else {
 					TaskType task = std::move(held);
 					static_cast<SchedulerImpl*>(this)->operator()(task);
-					held = scheduler_queue.walk();
+					if (++fired_from_wheel % 16 == 0) {
+						limit = Queue::now();
+					}
+					held = scheduler_queue.walk(limit);
 				}
-			} else if (!arrivals.empty() && arrivals.front()->ingest_tick < limit) {
+			} else if (!arrivals.empty() && arrivals.front()->hand.filed.tick < limit) {
 				TaskType task = std::move(arrivals.front());
 				arrivals.pop_front();
 				static_cast<SchedulerImpl*>(this)->operator()(task);
 				if (++fired_from_queue % 256 == 0) {
 					limit = Queue::now();
-					held = scheduler_queue.walk();
+					held = scheduler_queue.walk(limit);
 				}
 			} else {
 				break;
 			}
+		}
+	}
+
+	// Runs the wheel's due tasks, in the wheel's order, a few at a time: it takes up to `ahead`
+	// tasks out of the wheel, asks for the memory each will touch, then runs them, so the walk of
+	// one overlaps the cache misses of the ones before it when a backlog is spread over memory.
+	// A task cleared between its walk and its run is skipped when its turn comes, as one cleared
+	// after a single walk is. The clock is read once per batch.
+	void fire_wheel(unsigned long long limit) {
+		using Queue = SchedulerQueue<SchedulerImpl, ScheduledTaskImpl, thread_policy>;
+		constexpr unsigned ahead = 8;
+		TaskType batch[ahead];
+		for (;;) {
+			unsigned count = 0;
+			while (count < ahead && (batch[count] = scheduler_queue.walk(limit))) {
+				// The reference count in front of the task, and its flags and cleared time behind.
+				const char* at = reinterpret_cast<const char*>(batch[count].get());
+				__builtin_prefetch(at - 16, 1);
+				__builtin_prefetch(at + 47, 1);
+				++count;
+			}
+			for (unsigned i = 0; i < count; ++i) {
+				static_cast<SchedulerImpl*>(this)->operator()(batch[i]);
+				batch[i].reset();
+			}
+			if (count < ahead) {
+				return;
+			}
+			limit = Queue::now();
 		}
 	}
 
@@ -488,17 +600,14 @@ public:
 
 			// Then figure out if there's something that needs to be acted upon sooner
 			// than that wakeup time in the scheduler queue (an earlier wakeup time needed):
-			TaskType task;
 			L_SCHEDULER("BaseScheduler::" + DIM_GREY + "PEEPING" + CLEAR_COLOR + " - now:{}, wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(wakeup_time.time_since_epoch()).count());
-			if ((task = scheduler_queue.peep(wakeup_time))) {
-				if (task) {
-					pending = true;  // flag there are still scheduled things pending.
-					if (wakeup_time > task->wakeup_time) {
-						wakeup_time = task->wakeup_time;
-						L_SCHEDULER("BaseScheduler::" + PURPLE + "PEEP_UPDATED" + CLEAR_COLOR + " - now:{}, wakeup_time:{}  ({})", std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(wakeup_time.time_since_epoch()).count(), *task ? "valid" : "cleared");
-					} else {
-						L_SCHEDULER("BaseScheduler::" + DIM_GREY + "PEEPED" + CLEAR_COLOR + " - now:{}, wakeup_time:{}  ({})", std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(wakeup_time.time_since_epoch()).count(), *task ? "valid" : "cleared");
-					}
+			if (Task* task = scheduler_queue.peep(wakeup_time)) {
+				pending = true;  // flag there are still scheduled things pending.
+				if (wakeup_time > task->wakeup_time) {
+					wakeup_time = task->wakeup_time;
+					L_SCHEDULER("BaseScheduler::" + PURPLE + "PEEP_UPDATED" + CLEAR_COLOR + " - now:{}, wakeup_time:{}  ({})", std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(wakeup_time.time_since_epoch()).count(), *task ? "valid" : "cleared");
+				} else {
+					L_SCHEDULER("BaseScheduler::" + DIM_GREY + "PEEPED" + CLEAR_COLOR + " - now:{}, wakeup_time:{}  ({})", std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(wakeup_time.time_since_epoch()).count(), *task ? "valid" : "cleared");
 				}
 			}
 
@@ -595,9 +704,30 @@ public:
 
 	// scheduled, or why not: past the wheel's horizon, out of memory, or
 	// stopping (finish() began). Never throws.
-	schedule_result add(const TaskType& task) noexcept {
+	template <typename T>
+	schedule_result add(const std::shared_ptr<T>& task) noexcept {
+		return add_at(task, std::chrono::steady_clock::now());
+	}
+
+	template <typename T>
+	schedule_result add(const std::shared_ptr<T>& task, std::chrono::steady_clock::time_point wakeup_time) noexcept {
+		auto now = std::chrono::steady_clock::now();
+		if (wakeup_time < now) {
+			wakeup_time = now;
+		}
+		Task* const node = task.get();
+		node->wakeup_time = wakeup_time;
+		return add_at(task, now);
+	}
+
+private:
+	// The wheel insert, then the decision to wake the worker. `now` is a clock reading from before
+	// the insert; it only tells a published target that has already passed from one still ahead.
+	template <typename T>
+	schedule_result add_at(const std::shared_ptr<T>& task, std::chrono::steady_clock::time_point now) noexcept {
 		if (ending < 0) {
-			auto wakeup_time = task->wakeup_time;
+			Task* const node = task.get();
+			auto wakeup_time = node->wakeup_time;
 			assert(wakeup_time > std::chrono::steady_clock::time_point{});
 
 			if (auto result = scheduler_queue.add(task, wakeup_time); result != schedule_result::scheduled) {
@@ -612,7 +742,6 @@ public:
 			auto next_wakeup_time = atom_next_wakeup_time.load();
 			while (next_wakeup_time > wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(next_wakeup_time, wakeup_time)) { }
 
-			auto now = std::chrono::steady_clock::now();
 			if (sleeping.load() && (next_wakeup_time >= wakeup_time || next_wakeup_time <= now)) {
 				std::lock_guard<std::mutex> lk(mtx);
 				wakeup_signal.notify_one();
@@ -625,15 +754,7 @@ public:
 		return schedule_result::stopping;
 	}
 
-	schedule_result add(const TaskType& task, std::chrono::steady_clock::time_point wakeup_time) noexcept {
-		auto now = std::chrono::steady_clock::now();
-		if (wakeup_time < now) {
-			wakeup_time = now;
-		}
-		task->wakeup_time = wakeup_time;
-		return add(task);
-	}
-
+public:
 	// Hands `task` to the worker, which files it into the wheel on its next pass; the
 	// poster does no wheel insert and no allocation, one compare-exchange in all. The
 	// task fires at `wakeup_time` (raised to `now`, the caller's own clock reading, when
@@ -685,14 +806,14 @@ private:
 		}
 		Task* const node = task.get();
 		node->wakeup_time = wakeup_time;
-		node->post_hold = task;
+		node->begin_posted(task);
 		auto head = posted.load(std::memory_order_relaxed);
 		do {
 			if (head == closed_mark()) {
-				node->post_hold.reset();
+				node->end_posted();
 				return schedule_result::stopping;
 			}
-			node->post_next = head;
+			node->hand.posted.next = head;
 		} while (!posted.compare_exchange_weak(head, node, std::memory_order_seq_cst, std::memory_order_relaxed));
 
 		// Bring the worker's wakeup forward if this task is due before it, and signal it

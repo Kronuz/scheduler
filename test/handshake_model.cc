@@ -144,7 +144,7 @@ static long explore(State s, const std::vector<Op>& prog, long& runs) {
 	return lost;
 }
 
-// The producer side of `add(const TaskType&)`, in source order.
+// The producer side of `add_at(task, now)`, in source order.
 static std::vector<Op> read_add(const char* path) {
 	std::ifstream in(path);
 	std::stringstream ss;
@@ -152,13 +152,13 @@ static std::vector<Op> read_add(const char* path) {
 	std::string src = ss.str();
 	// From the signature to the load of `sleeping` that decides the signal (the trace calls after it
 	// read the published time too, but only to print it).
-	auto begin = src.find("schedule_result add(const TaskType& task) noexcept {");
+	auto begin = src.find("schedule_result add_at(const std::shared_ptr<T>& task, std::chrono::steady_clock::time_point now) noexcept {");
 	auto end = begin == std::string::npos ? begin : src.find("sleeping.load()", begin);
 	if (end != std::string::npos) {
 		end += std::string("sleeping.load()").size();
 	}
 	if (end == std::string::npos) {
-		std::fprintf(stderr, "add(const TaskType&) not found in %s\n", path);
+		std::fprintf(stderr, "add_at(task, now) not found in %s\n", path);
 		std::exit(1);
 	}
 	src = src.substr(begin, end - begin);
