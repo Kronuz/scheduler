@@ -11,7 +11,8 @@
 //   5. nothing runs under the worker's mutex: a cancelled task's destructor that posts, and a task
 //      posted between the worker's peep and its sleep;
 //   6. posters that read the clock, wait and then push ordered tasks (the logger's shape) keep due order
-//      between posts that are ordered in time.
+//      between posts that are ordered in time;
+//   7. a pass that finds a task already due walks at once: no mutex, no `sleeping` for producers to signal.
 //
 // The timing windows are generous; nothing asserts a tight race by luck.
 #include <algorithm>
@@ -28,11 +29,11 @@
 #include <thread>
 #include <vector>
 
-// Test seams in scheduler.h: the worker's pass (between its peep and its sleep) and a poster
-// between its `stopping` check and its push.
-static void pass_hook();
+// Test seams in scheduler.h: the worker's pass (between its peep and its sleep, and where it goes to
+// sleep) and a poster between its `stopping` check and its push.
+static void pass_hook(const char* site, bool flag);
 static void push_hook();
-#define SCHEDULER_TEST_HOOK(site, stale) pass_hook()
+#define SCHEDULER_TEST_HOOK(site, stale) pass_hook(site, stale)
 #define SCHEDULER_PUSH_HOOK() push_hook()
 
 #include "scheduler.h"
@@ -61,6 +62,7 @@ struct PostTask : public PostBase {
 	int id;
 	std::chrono::milliseconds hold{0};   // keeps the worker busy this long when it fires
 	std::function<void()> on_destroy;    // runs in the destructor, wherever the last reference goes
+	std::function<void()> on_fire;       // runs when it fires, on the worker thread
 	PostTask(Sink* s, int i) : sink(s), id(i) {}
 	~PostTask() {
 		if (on_destroy) {
@@ -73,6 +75,9 @@ struct PostTask : public PostBase {
 			sink->fired.push_back(id);
 		}
 		sink->count.fetch_add(1, std::memory_order_relaxed);
+		if (on_fire) {
+			on_fire();
+		}
 		if (hold.count() != 0) {
 			std::this_thread::sleep_for(hold);
 		}
@@ -91,10 +96,18 @@ static bool wait_for(Pred pred, std::chrono::milliseconds limit = 10s) {
 	return pred();
 }
 
-// The worker's pass seam runs `pass_action` once, on the worker thread, when a test arms it.
+// The worker's pass seam runs `pass_action` once, on the worker thread, when a test arms it. The sleep
+// seam counts the times the worker went to sleep (mutex, `sleeping`) although its look found a task due.
 static std::atomic<std::function<void()>*> pass_action{nullptr};
 static std::atomic<bool> pass_done{false};   // release: the action has finished, and no longer touches the test's locals
-static void pass_hook() {
+static std::atomic<long> slept_while_due{0};
+static void pass_hook(const char* site, bool flag) {
+	if (std::string_view(site) == "sleep") {
+		if (flag) {
+			slept_while_due.fetch_add(1, std::memory_order_relaxed);
+		}
+		return;
+	}
 	if (auto* f = pass_action.load(std::memory_order_acquire)) {
 		if (pass_action.compare_exchange_strong(f, nullptr)) {
 			(*f)();
@@ -688,6 +701,36 @@ static void test_ordered_posters() {
 	std::printf("post ordered posters OK: 5 rounds of 4 posters that wait between the clock and the push\n");
 }
 
+// A pass whose look finds a task already due walks at once. It takes no mutex and never sets `sleeping`, so
+// a producer arming tasks meanwhile has no sleeping worker to signal and does not queue on the mutex the
+// worker holds (with the worker taking it on every pass, one producer's add() cost 1.33 times as much).
+// Each task posts the next one, due now: the worker files it at the top of its next pass, whose look then
+// finds it due.
+static void test_busy_pass_takes_no_lock() {
+	Sink sink;
+	PostSched sched("POST");
+	constexpr int kChain = 50;
+	std::vector<std::shared_ptr<PostTask>> chain;
+	for (int i = 0; i < kChain; ++i) {
+		chain.push_back(make(sink, i));
+	}
+	for (int i = 0; i + 1 < kChain; ++i) {
+		chain[i]->on_fire = [&sched, next = chain[i + 1]] {
+			auto now = std::chrono::steady_clock::now();
+			CHECK(sched.post(next, now, now) == schedule_result::scheduled);
+		};
+	}
+	slept_while_due.store(0);
+	auto now = std::chrono::steady_clock::now();
+	CHECK(sched.post(chain[0], now, now) == schedule_result::scheduled);
+	CHECK(wait_for([&] { return sink.count.load() == kChain; }, 5s));
+	if (slept_while_due.load() != 0) {
+		std::fprintf(stderr, "the worker took the mutex and announced `sleeping` %ld times with a task already due\n", slept_while_due.load());
+		std::abort();
+	}
+	std::printf("post busy pass OK: %d passes that found a task due walked without the mutex\n", kChain - 1);
+}
+
 int main(int argc, char** argv) {
 	struct Entry {
 		const char* name;
@@ -709,6 +752,7 @@ int main(int argc, char** argv) {
 		{"peep_sleep", test_post_between_peep_and_sleep},
 		{"peep_sleep_stale", test_post_between_peep_and_sleep_stale},
 		{"ordered_posters", test_ordered_posters},
+		{"busy_pass", test_busy_pass_takes_no_lock},
 	};
 	// With arguments, run only the named tests (to run one on its own).
 	for (const auto& t : tests) {

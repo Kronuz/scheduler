@@ -15,6 +15,7 @@ scheduler_trace.h           No-op L_NOTHING / L_DEBUG_HOOK / L_EXC / L_CALL hook
 test/test.cc                Tests: inline Scheduler order, clear() cancel, ThreadedScheduler, Debouncer collapse and force window, the add-between-peep-and-sleep race (via SCHEDULER_TEST_HOOK).
 test/soak.cc                Lost-task soak (`scheduler_soak`): any task that never fires fails it.
 test/post.cc                post() and post_ordered(): order (one thread, across threads, mixed delays against the wheel's oracle), cancel, wake, horizon, many producers, finish() racing the posters.
+test/handshake_model.cc     add()'s side of the sleep handshake, read from scheduler.h, against a store-buffer model of the worker's pass.
 bench/bench_post.cc         What a producer pays to arm a task: add(), post(), post_ordered() (`SCHEDULER_BENCH`).
 examples/colored_trace/     Runnable demo that injects a real trace header to restore colored, formatted trace output.
 CMakeLists.txt              STATIC library `scheduler` (+ alias scheduler::scheduler); FetchContents stash + threadpool; CTest test `scheduler`.
@@ -100,7 +101,12 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   proposes a wakeup, `peep`s for something sooner, CASes `atom_next_wakeup_time`,
   and sleeps on a condvar under `mtx`. `add()` lowers `atom_next_wakeup_time` and
   notifies. The mutex must be held across the load-then-wait so an `add()` can't
-  slip between them. Keep the lock discipline exactly as is.
+  slip between them. Keep the lock discipline exactly as is. `add()` reads the
+  published wakeup time and `sleeping` only after its seq_cst fence
+  (`scheduler_handshake_model` reads the order from this header and fails
+  otherwise). A pass that finds a task due already walks at once, without the mutex
+  and without setting `sleeping`; `busy_pass` (`test/post.cc`) fails if it sleeps
+  instead, which made one producer's `add()` cost a third more.
 
 - **`post()` hands a task over; `ingest()` files it.** Posters push onto `posted`, a lock-free
   stack, with one compare-exchange (the task carries `post_next` and an owning `post_hold`, so

@@ -59,9 +59,11 @@ using namespace std::chrono_literals;
 #endif
 
 // Test seam in the worker's loop: a no-op by default. The tests define it to park the worker
-// at a named point, which makes the add()/sleep races deterministic. `stale` is true when the
-// worker found nothing pending and its local copy of the published wakeup time still equals
-// the published one, so its next compare-exchange will succeed.
+// at a named point, which makes the add()/sleep races deterministic. At "after_peep", `stale`
+// is true when the worker found nothing pending and its local copy of the published wakeup
+// time still equals the published one, so its next compare-exchange will succeed. At "sleep"
+// (the worker is about to take the mutex and announce `sleeping`), it is true when the
+// worker's own look found a task already due, which it never does: it walks at once instead.
 #ifndef SCHEDULER_TEST_HOOK
 #define SCHEDULER_TEST_HOOK(site, stale) ((void)0)
 #endif
@@ -523,45 +525,54 @@ public:
 			}
 			while (next_wakeup_time > wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(next_wakeup_time, wakeup_time)) { }
 
-			// Sleep until wakeup time arrives or someone adding a task wakes us up;
-			// make sure we first lock mutex so there cannot be race condition between
-			// the time we load the next_wakeup_time and we actually start waiting:
-			L_DEBUG_HOOK("BaseScheduler::LOOP", "BaseScheduler::" + STEEL_BLUE + "LOOP" + CLEAR_COLOR + " - now:{}, next_wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(atom_next_wakeup_time.load().time_since_epoch()).count());
-			lk.lock();
-			sleeping.store(true);
-			wake_requested.store(false);
-			// A task added after the peep above whose add() found nothing to lower (the
-			// published wakeup time was stale, already past or earlier than the task) and
-			// that saw `sleeping` still false would not signal; the worker would then sleep
-			// to a target later than the task is due. The fence pairs with the one in add():
-			// either add() sees `sleeping` and signals under the mutex we hold, or this
-			// peep sees the task. A post() pairs the same way through `posted`: it pushes,
-			// then reads `sleeping`; the worker stores `sleeping`, then reads `posted`.
-			std::atomic_thread_fence(std::memory_order_seq_cst);
-			// A task posted before this point is on the stack, and filing it can run task code (the
-			// destructor of a task cancelled before it was filed, a task the wheel refused), which must
-			// not run under `mtx` (push() takes it to signal): file it after unlocking, below, instead
-			// of sleeping.
-			if (!has_posted()) {
+			// Something due already means no wait: the worker walks at once, without the mutex and
+			// without announcing `sleeping`, so producers arming tasks meanwhile have no sleep to cut
+			// short and do not signal. Only a worker that may wait takes the path below.
+			if (wakeup_time <= now) {
 				next_wakeup_time = atom_next_wakeup_time.load();
-				if (auto late = scheduler_queue.peep(next_wakeup_time)) {
-					if (late->wakeup_time < next_wakeup_time) {
-						next_wakeup_time = late->wakeup_time;
+			} else {
+				SCHEDULER_TEST_HOOK("sleep", wakeup_time <= now);
+
+				// Sleep until wakeup time arrives or someone adding a task wakes us up;
+				// make sure we first lock mutex so there cannot be race condition between
+				// the time we load the next_wakeup_time and we actually start waiting:
+				L_DEBUG_HOOK("BaseScheduler::LOOP", "BaseScheduler::" + STEEL_BLUE + "LOOP" + CLEAR_COLOR + " - now:{}, next_wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(atom_next_wakeup_time.load().time_since_epoch()).count());
+				lk.lock();
+				sleeping.store(true);
+				wake_requested.store(false);
+				// A task added after the peep above whose add() found nothing to lower (the
+				// published wakeup time was stale, already past or earlier than the task) and
+				// that saw `sleeping` still false would not signal; the worker would then sleep
+				// to a target later than the task is due. The fence pairs with the one in add():
+				// either add() sees `sleeping` and signals under the mutex we hold, or this
+				// peep sees the task. A post() pairs the same way through `posted`: it pushes,
+				// then reads `sleeping`; the worker stores `sleeping`, then reads `posted`.
+				std::atomic_thread_fence(std::memory_order_seq_cst);
+				// A task posted before this point is on the stack, and filing it can run task code (the
+				// destructor of a task cancelled before it was filed, a task the wheel refused), which must
+				// not run under `mtx` (push() takes it to signal): file it after unlocking, below, instead
+				// of sleeping.
+				if (!has_posted()) {
+					next_wakeup_time = atom_next_wakeup_time.load();
+					if (auto late = scheduler_queue.peep(next_wakeup_time)) {
+						if (late->wakeup_time < next_wakeup_time) {
+							next_wakeup_time = late->wakeup_time;
+							auto published = atom_next_wakeup_time.load();
+							while (published > next_wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(published, next_wakeup_time)) { }
+						}
+					}
+					if (!arrivals.empty() && arrivals.front()->wakeup_time < next_wakeup_time) {
+						next_wakeup_time = arrivals.front()->wakeup_time;
 						auto published = atom_next_wakeup_time.load();
 						while (published > next_wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(published, next_wakeup_time)) { }
 					}
+					if (next_wakeup_time > now) {
+						wakeup_signal.wait_until(lk, next_wakeup_time);
+					}
 				}
-				if (!arrivals.empty() && arrivals.front()->wakeup_time < next_wakeup_time) {
-					next_wakeup_time = arrivals.front()->wakeup_time;
-					auto published = atom_next_wakeup_time.load();
-					while (published > next_wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(published, next_wakeup_time)) { }
-				}
-				if (next_wakeup_time > now) {
-					wakeup_signal.wait_until(lk, next_wakeup_time);
-				}
+				sleeping.store(false);
+				lk.unlock();
 			}
-			sleeping.store(false);
-			lk.unlock();
 			L_SCHEDULER("BaseScheduler::" + DODGER_BLUE + "WAKEUP" + CLEAR_COLOR + " - now:{}, wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(wakeup_time.time_since_epoch()).count());
 
 			// File what was posted while it slept (it may be what woke it), then start
@@ -591,14 +602,15 @@ public:
 				return result;
 			}
 
+			// Pairs with the worker's fence before it sleeps. Everything this decides from is
+			// read after the fence: either the worker's fence comes first, so this sees its
+			// `sleeping` and the target it raised (and lowers it and signals), or this one
+			// does, so the worker's last look at the wheel sees the task.
+			std::atomic_thread_fence(std::memory_order_seq_cst);
 			auto next_wakeup_time = atom_next_wakeup_time.load();
 			while (next_wakeup_time > wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(next_wakeup_time, wakeup_time)) { }
 
-			// The seq_cst store/load pair with the worker's `sleeping` store and its
-			// next-wakeup reload means a worker that is not yet asleep sees the lowered
-			// wakeup time itself.
 			auto now = std::chrono::steady_clock::now();
-			std::atomic_thread_fence(std::memory_order_seq_cst);   // pairs with the worker's, before it sleeps
 			if (sleeping.load() && (next_wakeup_time >= wakeup_time || next_wakeup_time <= now)) {
 				std::lock_guard<std::mutex> lk(mtx);
 				wakeup_signal.notify_one();

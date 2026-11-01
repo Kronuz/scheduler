@@ -3,6 +3,32 @@
 All notable changes to `scheduler` are recorded here, newest first. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 2026-10-31 (audit fixes)
+
+### Fixed
+
+- `add()` reads the published wakeup time, and decides whether to signal, only after its
+  seq_cst fence (audit S1). It read the time before the fence, and the wheel insert is
+  release-only, so the C++ model allowed it to read a target between now and the task, skip
+  the signal, and leave a worker that had raised its target and missed the insert asleep
+  until that target (up to 30 s). No run on arm64 or x86 shows it (the insert would have to
+  stay in a store buffer for a whole worker pass); `scheduler_handshake_model` reads the
+  order from `scheduler.h` and finds the loss in 88 of 7 746 store-buffer interleavings of
+  the old order and in none of the new.
+
+### Changed
+
+- A worker pass that finds a task already due walks at once, without taking the mutex and
+  without setting `sleeping` (audit S2). Every pass took the mutex and announced `sleeping`
+  around its second look at the wheel, so a producer adding tasks while the worker ran them
+  found it "sleeping" with a past target and queued on the mutex to signal it. One
+  producer's `add()` of tasks due now, Apple M4 Pro, `quiet strict`, median of 7, two
+  rounds (a probe from the audit, pre-made tasks): 411 / 401 ns before the lost-task fix,
+  503 / 508 after it, 523 / 526 on the previous main, 390 / 424 now. Four producers:
+  920 / 884 ns before, 839 / 849 now. `post()` and `post_ordered()` with one producer stay
+  at 20 to 22 ns. `busy_pass` (`test/post.cc`) fails if a pass with a task due takes the
+  sleep path.
+
 ## 2026-10-31 (producer hand-off)
 
 ### Added

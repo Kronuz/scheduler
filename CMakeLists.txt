@@ -63,6 +63,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(scheduler_post_test PRIVATE scheduler)
   add_test(NAME scheduler_post COMMAND scheduler_post_test)
 
+  # add()'s side of the sleep handshake, read from scheduler.h, against a store-buffer model of
+  # the worker's pass in every interleaving (no hardware run can show a fence placed too late).
+  add_executable(scheduler_handshake_model test/handshake_model.cc)
+  add_test(NAME scheduler_handshake_model COMMAND scheduler_handshake_model "${CMAKE_CURRENT_SOURCE_DIR}/scheduler.h")
+
   # Allocation failure (no_memory). It replaces global operator new and delete,
   # which TSan's static runtime also defines (a link clash), so TSan builds skip
   # it; CI passes TSan through the per-config and linker flags.

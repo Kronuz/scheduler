@@ -92,9 +92,11 @@ Its loop:
 2. `peep` the queue for anything due sooner; if found, lower the proposed wakeup
    to that task's `wakeup_time` and flag `pending`.
 3. CAS the proposed time into `atom_next_wakeup_time`.
-4. Under `mtx`, reload `atom_next_wakeup_time` and `wait_until` on the condvar —
-   so the thread sleeps until the earliest task is due, or until an `add()`
-   notifies it sooner.
+4. If a task is due already, skip to step 5: there is nothing to wait for, so the
+   worker neither takes `mtx` nor announces `sleeping`, and producers arming tasks
+   while it runs them see no sleeping worker to signal. Otherwise, under `mtx`,
+   reload `atom_next_wakeup_time` and `wait_until` on the condvar, so the thread
+   sleeps until the earliest task is due, or until an `add()` notifies it sooner.
 5. On wake, `clean_checkpoint()`, then `walk()` every due task and hand each to
    the run strategy (`static_cast<SchedulerImpl*>(this)->operator()(task)`), then
    `clean()`.
@@ -111,13 +113,21 @@ time. That alone leaves a window: the published time can be *stale* (already pas
 earlier than the new task), so `add()` has nothing to lower, and a worker between its
 `peep` and its sleep is not yet `sleeping`, so `add()` sends no signal. The worker would
 then publish a fresh 30 s target and sleep through a task due now. A Dekker pair closes
-the window: `add()` places the task, fences
-(seq_cst) and loads `sleeping`; the worker stores `sleeping`, fences and, under the
-mutex, `peep`s once more before it waits, lowering its target to what it finds. One side
-always sees the other: either `add()` sees `sleeping` and signals under the mutex the
-worker holds until it waits, or the worker's second `peep` sees the task. The stale-publish
-window is reproduced deterministically by `test_add_between_peep_and_sleep` (the
-`SCHEDULER_TEST_HOOK` seam parks the worker there) and soaked by `scheduler_soak`.
+the window: `add()` places the task, fences (seq_cst), and only then reads the published
+wakeup time (lowering it to the task's) and `sleeping`; the worker stores `sleeping`,
+fences and, under the mutex, `peep`s once more before it waits, lowering its target to what
+it finds. Of the two fences, whichever comes first in the seq_cst order makes the other side
+see what preceded it: if the worker's does, `add()` sees `sleeping` and the target the worker
+raised, lowers it and signals under the mutex the worker holds until it waits; if `add()`'s
+does, the worker's second `peep` sees the task. (`add()` must not read the published time
+before its fence: the wheel insert is release-only, so a stale read there, a target between
+now and the task, would let it skip the signal while the worker, having missed the insert,
+sleeps to the target it raised.) The stale-publish window is reproduced deterministically by
+`test_add_between_peep_and_sleep` (the `SCHEDULER_TEST_HOOK` seam parks the worker there) and
+soaked by `scheduler_soak`; the order of `add()`'s operations is checked by
+`scheduler_handshake_model`, which reads them from `scheduler.h` and runs them against the
+worker's pass in every interleaving of a store-buffer model, because no run on real hardware
+shows a fence placed too late.
 
 `end(wait)` sets a countdown that lets the loop drain pending work, then exit.
 
