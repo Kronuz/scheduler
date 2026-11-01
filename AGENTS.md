@@ -23,7 +23,6 @@ CMakeLists.txt              STATIC library `scheduler` (+ alias scheduler::sched
 LICENSE                     MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                   What it is, install, quick start.
 docs/API.md                 The API reference and the tracing hooks.
-docs/scheduler.d2           The README diagram's source (docs/scheduler.svg is rendered from it).
 examples/demo.cc            A runnable tour (target scheduler_demo).
 ARCHITECTURE.md             Internal design, the timing model, trade-offs.
 ```
