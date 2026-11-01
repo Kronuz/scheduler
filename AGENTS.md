@@ -106,7 +106,10 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   (`scheduler_handshake_model` reads the order from this header and fails
   otherwise). A pass that finds a task due already walks at once, without the mutex
   and without setting `sleeping`; `busy_pass` (`test/post.cc`) fails if it sleeps
-  instead, which made one producer's `add()` cost a third more.
+  instead, which made one producer's `add()` cost a third more. A busy pass files the
+  stack once, and no pass writes `ending` before `finish()` begins: producers touch
+  `posted` and read `ending` on every call, so each extra worker write there costs
+  four producers' `post()` (CHANGELOG.md).
 
 - **`post()` hands a task over; `ingest()` files it.** Posters push onto `posted`, a lock-free
   stack, with one compare-exchange (the task carries `post_next` and an owning `post_hold`, so

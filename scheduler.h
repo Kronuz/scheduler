@@ -472,8 +472,9 @@ public:
 		lk.unlock();
 
 		while (ending != 0) {
-			if (--ending < 0) {
-				ending = -1;
+			// Count a finish() down, one pass at a time; while none has begun, leave `ending` (which
+			// every add() and post() reads) unwritten.
+			for (auto e = ending.load(std::memory_order_relaxed); e > 0 && !ending.compare_exchange_weak(e, e - 1);) {
 			}
 
 			bool pending = false;
@@ -525,9 +526,10 @@ public:
 			}
 			while (next_wakeup_time > wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(next_wakeup_time, wakeup_time)) { }
 
-			// Something due already means no wait: the worker walks at once, without the mutex and
-			// without announcing `sleeping`, so producers arming tasks meanwhile have no sleep to cut
-			// short and do not signal. Only a worker that may wait takes the path below.
+			// Something due already means no wait: the worker walks at once (it filed the stack at the top
+			// of the pass), without the mutex and without announcing `sleeping`, so producers arming tasks
+			// meanwhile have no sleep to cut short and do not signal. Only a worker that may wait takes the
+			// path below.
 			if (wakeup_time <= now) {
 				next_wakeup_time = atom_next_wakeup_time.load();
 			} else {
@@ -572,12 +574,12 @@ public:
 				}
 				sleeping.store(false);
 				lk.unlock();
+				// File what was posted while it slept (it may be what woke it).
+				ingest();
 			}
 			L_SCHEDULER("BaseScheduler::" + DODGER_BLUE + "WAKEUP" + CLEAR_COLOR + " - now:{}, wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(wakeup_time.time_since_epoch()).count());
 
-			// File what was posted while it slept (it may be what woke it), then start
-			// walking the queue and running still pending tasks.
-			ingest();
+			// Walk the queue and run what is due.
 			scheduler_queue.clean_checkpoint();
 			fire_due();
 			scheduler_queue.clean();

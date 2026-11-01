@@ -38,6 +38,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   as above); due in 1 ms: 319 / 321 ns before, 149 / 149 now; four producers, due now:
   839 / 849 ns before, 628 / 626 now.
 - ctest runs the soak with three producers too (`scheduler_soak_producers`).
+- A worker pass files the posted stack once when it finds work due (it filed a second time just
+  before walking), and the worker no longer writes `ending` on every pass while no `finish()` has
+  begun (it decremented it and stored -1 back; a `finish()` landing between the two was lost). With
+  the worker filing at stash 78a18f3's speed, both writes hit lines every producer touches on each
+  call: four producers' `post()` of tasks due now cost 531 to 649 ns per call (median 614, 15 runs)
+  against 432 to 615 (median 499, 17 runs) with the parent stash, and costs 462 to 595 (median 534,
+  10 runs) now (Apple M4 Pro, 100 000 to 200 000 tasks per producer, median of 7 per run,
+  alternated). On the Intel i9 laptop the parent stash does not finish that row: the worker, filing
+  400 000 overdue tasks into one leaf, has not run them 30 s later.
 
 ## 2026-10-31 (producer hand-off)
 
