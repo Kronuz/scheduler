@@ -53,6 +53,11 @@ int main(int argc, char** argv) {
 			sched.add(std::make_shared<SoakTask>(), std::chrono::steady_clock::now() + 30ms);
 			std::this_thread::sleep_for(100ms);
 			far->clear();
+			// The 30 ms task has run by now unless the machine is starved; wait for it, so a late one is
+			// not counted among the tasks below (the macos-x86_64 runner showed lost=-1).
+			for (auto until = std::chrono::steady_clock::now() + 2s; g_ran.load() < 1 && std::chrono::steady_clock::now() < until;) {
+				std::this_thread::sleep_for(1ms);
+			}
 			g_ran.store(0);
 			for (int i = 0; i < kEach; ++i) {
 				sched.add(std::make_shared<SoakTask>(), std::chrono::steady_clock::now());

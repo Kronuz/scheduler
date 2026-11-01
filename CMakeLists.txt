@@ -57,6 +57,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_test(NAME scheduler_soak COMMAND scheduler_soak 300000 1 2 0)
   add_test(NAME scheduler_soak_burst COMMAND scheduler_soak 60000 1 2 1)
 
+  # post(): the lock-free hand-off from producer threads to the worker (order, cancel,
+  # wake, many producers, a finish() that races the posters).
+  add_executable(scheduler_post_test test/post.cc)
+  target_link_libraries(scheduler_post_test PRIVATE scheduler)
+  add_test(NAME scheduler_post COMMAND scheduler_post_test)
+
   # Allocation failure (no_memory). It replaces global operator new and delete,
   # which TSan's static runtime also defines (a link clash), so TSan builds skip
   # it; CI passes TSan through the per-config and linker flags.
@@ -78,5 +84,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   if(SCHEDULER_BENCH)
     add_executable(scheduler_bench_churn bench/bench_churn.cc)
     target_link_libraries(scheduler_bench_churn PRIVATE scheduler)
+    # What a producer pays to arm a task: add(), post() and post_ordered().
+    add_executable(scheduler_bench_post bench/bench_post.cc)
+    target_link_libraries(scheduler_bench_post PRIVATE scheduler)
   endif()
 endif()
