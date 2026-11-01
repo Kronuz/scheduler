@@ -116,6 +116,42 @@ Not for:
 - Tasks more than 24 hours out: `add` returns `schedule_result::past_horizon` for them, and they
   never fire.
 
+## ⚡ Performance
+
+`scheduler_bench_post --compare` times what a producer pays to arm a task due 1 ms later while
+the scheduler thread runs the earlier ones: 200,000 tasks per producer, nanoseconds per task, the
+range over two runs, each the median of five rounds. Every column includes making the task
+(`std::make_shared`) and reading the clock, which *make only* times alone. *`add()`* files the
+task into the wheel on the producer's thread; *`post()`* hands it to the scheduler thread, which
+files it; *`post_ordered()`* hands it over to be kept in arrival order. The comparator, *queue*,
+is the timer queue a caller writes without the library: a `std::priority_queue` of (due time,
+arrival, task) under one `std::mutex`, and one thread that sleeps on a condition variable and
+runs the due tasks in batches of up to 64 with the lock released, using libc++ as shipped with
+Apple clang 17.0.0. Before timing, the bench checks that 300 tasks armed in shuffled order fire
+in the same order from the wheel and from the queue (due time, then arming order).
+
+| Machine, producers | make only | `add()` | `post()` | `post_ordered()` | queue |
+|---|---:|---:|---:|---:|---:|
+| Apple M4 Pro, 1 | 37 to 38 | 160 to 162 | 44 | 43 to 44 | 103 to 104 |
+| Apple M4 Pro, 4 | 44 to 46 | 660 to 663 | 596 to 643 | 631 to 687 | 1,212 to 1,241 |
+| Intel Core i9-9980HK, 1 | 145 to 151 | 399 to 404 | 164 to 168 | 155 to 167 | 340 to 344 |
+| Intel Core i9-9980HK, 4 | 148 to 151 | 604 to 612 | 281 to 287 | 305 to 310 | 3,633 to 3,725 |
+
+With one producer the queue's push is cheaper than `add()`, and `post()` is cheaper than both;
+with four producers the queue's one mutex costs about twice `add()` on the M4 Pro and six times
+on the i9. Running 200,000 tasks due at one instant, from the first run to the last, the queue
+is faster: 63 to 64 ns per task against 66 to 67 for the wheel on the M4 Pro, and 103 to 105
+against 200 to 209 on the i9.
+
+Apple M4 Pro (arm64), macOS 26.7.2, and Intel Core i9-9980HK (x86_64), macOS 15.8.1, both with
+Apple clang 17.0.0 and `-O3 -DNDEBUG`, at `e86b82f`:
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DSCHEDULER_BENCH=ON
+cmake --build build --target scheduler_bench_post
+./build/scheduler_bench_post --compare
+```
+
 ## 📚 Documentation
 
 - [docs/API.md](docs/API.md): `ScheduledTask`, `Scheduler`, `ThreadedScheduler`, `Debouncer`, and
@@ -147,7 +183,7 @@ short run is a CTest test; run it with 100M adds to soak.
 
 `SCHEDULER_BENCH` builds `scheduler_bench_churn` (the debouncer under cancel churn) and
 `scheduler_bench_post` (what a producer pays to arm a task with `add()`, `post()` and
-`post_ordered()`).
+`post_ordered()`; `--compare` adds the `std::priority_queue` timer queue).
 
 ## 🤝 Contributing
 
