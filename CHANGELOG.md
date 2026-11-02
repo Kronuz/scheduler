@@ -5,6 +5,38 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## 2026-11-01
 
+### Changed
+
+- `ScheduledTask` is 72 bytes on a 64-bit target, from 96 (it was 48 before `post()`). Every task a
+  caller makes paid for the fields of `post()`, posted or not, and `make only` (`std::make_shared`
+  of a trivial task and a clock reading) was the one row slower than the commit before `post()`
+  (`ae3f0f9`). The stack link and the owning reference a task holds while it waits on `post()`'s
+  stack, and the filing number and tick it gets once the worker has filed it, never coexist, so
+  they share one 24-byte union (`hand`, with `begin_posted()` and `end_posted()` for the stages),
+  and `post_ordered` sits in the padding after `atom_cancelled`. libc++ puts 24 bytes of control
+  block in front of the task, so the allocation is 96 bytes where it was 128 (and 80 at `ae3f0f9`).
+  `make only`, ns per task, 15 interleaved runs per binary in one `quiet strict` hold per machine
+  (START `ae3f0f9`, before `80d640f`, after; the ratio is START over the row, the A/A is START
+  against START again):
+
+  | | START | before | after | START / before | START / after | A/A |
+  |---|---:|---:|---:|---:|---:|---:|
+  | Apple M4 Pro, 1 producer | 36.2 | 37.1 | 36.9 | 0.986 | 0.987 | 1.008 |
+  | Apple M4 Pro, 4 producers | 41.3 | 44.4 | 43.4 | 0.958 | 0.957 | 1.007 |
+  | Intel i9-9980HK, 1 producer | 137.9 | 144.2 | 133.7 | 0.965 | 1.015 | 1.034 |
+  | Intel i9-9980HK, 4 producers | 142.8 | 148.4 | 141.6 | 0.951 | 1.017 | 0.999 |
+
+  The i9 is back to START. The M4 Pro with four producers stays 4% above it: the task would have to
+  be 56 bytes to land in START's 80-byte allocation class, which needs the hand-off fields out of the
+  task (scheduler#2). The other rows of `scheduler_bench_post` (add, post, post_ordered, one and
+  four producers), before against after with an A/A: -1.2% to +12% on the M4 Pro, -1.1% to +12% on
+  the i9, none slower beyond the A/A spread.
+- `test/task_size.cc` (`scheduler_task_size`): the task is 72 bytes, the posted stage holds the task
+  and gives the hold up once, and the filed stage reads zero for a task never posted and after a
+  posted stage ends. With the old layout the size check fails (96, not 72). With `end_posted()` not
+  zeroing the filed stage the stage test fails, and with `begin_posted()` not taking the hold
+  `scheduler_post` crashes.
+
 ### Tests
 
 - `test/no_memory.cc` covers an allocation failure in the worker's arrival queue
