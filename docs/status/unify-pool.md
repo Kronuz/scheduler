@@ -5,7 +5,7 @@
 - Task: `ThreadedScheduler` runs on a `WorkPool` and one `WorkGroup`; `ThreadPool` is no longer used here.
 - Branch: `phase7c/unify-pool`, from main `scheduler:2cbea95`; pins `threadpool:44551e5` (`phase7c/unify-pool`).
 - Commit: `scheduler:c502949`. Review: none yet (the lead launches it).
-- State: tests, mutants and the A/A bench done; sanitizers and CI below.
+- State: tests, mutants, sanitizers, A/A bench and CI done; waiting for the review.
 
 ## Change
 
@@ -40,9 +40,18 @@
   `add()` and `L_INFO` do not touch the pool: new is within the control's spread. Firing a backlog through the pool is 11.8x faster
   (the old pool woke a sleeper per task). `L_INFO` bench: `.scratch/logbench` (logger main with the scheduler overridden).
 
+- Sanitizers: `preflight.sh` (mac hardened, mac ASan+UBSan, Linux and FreeBSD VMs) ok on both repos at the branch heads;
+  TSan (Homebrew LLVM, `-O1`) clean on `scheduler_test` and on threadpool's `work_counts`, `work_group`, `work_pool`, `work_wait`,
+  `work_scheduling`. `scheduler_no_memory` skips TSan by design.
+- Findings on the way: CI's Linux ASan run caught the no_memory test's operator new replacement missing the nothrow forms
+  (the pool's box uses `new (std::nothrow)`): fixed in `test/no_memory.cc`. CI's FreeBSD run caught a timing flake in
+  threadpool `work_group.cc` case 4 (a flush ended before the query looked; not caused by this work): the test now holds the flushes.
+- CI (workflow_dispatch on the branch): threadpool run 41518748791 all jobs green; scheduler run 41518757480 see the lead's check.
+
 ## Next
 
-Sanitizers (ASan+UBSan via `preflight.sh`, TSan) and CI results are appended below; then the lead's review; then steps 3 to 5.
+After the review: threadpool steps 3 to 5 (delete the `ThreadPool` family, repin logger, strata, prospect and the other
+consumers, then Xapiand on `deps/pins-2026-11`, the Detent note). Land threadpool and scheduler on main when the review clears.
 
 ## Blocked on
 
