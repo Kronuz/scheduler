@@ -12,7 +12,7 @@ include(FetchContent)
 FetchContent_Declare(
   stash
   GIT_REPOSITORY https://github.com/Kronuz/stash.git
-  GIT_TAG        0b188b4279ef9b89089aca281b446351b96e129e
+  GIT_TAG        3bfc455d275d84175da779ec934141ce6ab99418
 )
 FetchContent_Declare(
   threadpool
