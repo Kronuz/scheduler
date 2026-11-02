@@ -60,7 +60,7 @@
 
 ## Step 4: repin on the threadpool without `ThreadPool` (branch `phase7c/drop-threadpool`)
 
-- `CMakeLists.txt` pins threadpool `db38594` (branch `phase7c/drop-threadpool`, which deletes the `ThreadPool` family and trims
+- `CMakeLists.txt` pins threadpool `eb4751a` (branch `phase7c/drop-threadpool`, which deletes the `ThreadPool` family and trims
   `ThreadPolicyType` to `regular` and `logging`). The scheduler used neither; nothing else changes. `ThreadPolicyType::regular` is
   the only value any file here names.
 
