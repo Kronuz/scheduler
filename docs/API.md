@@ -30,10 +30,15 @@ CRTP base for a cancellable scheduled task.
 Same as `Scheduler` plus a worker pool.
 
 - `ThreadedScheduler(std::string name, const char* format, size_t num_threads)` —
-  `format` is a `std::format` worker-name string (e.g. `"TW{:02}"`).
-- `size()`, `running_size()`, `threadpool_size()`, `threadpool_capacity()` —
-  pool state queries.
+  owns a `WorkPool` of `num_threads` workers and one `WorkGroup` for its tasks.
+  `format` is a `std::format` worker-name string (e.g. `"TW{:02}"`). Every worker runs
+  tasks (no reserve).
+- `size()` (dispatched, not started), `running_size()` (executing),
+  `threadpool_size()` and `threadpool_capacity()` (the worker count) — pool state queries.
 - runs each due task by **dispatching** it to the pool.
+- `finish(wait)` stops the wheel and drops the dispatched tasks that have not started;
+  running ones finish. With `wait != 0` it also joins. `join(timeout)` waits for the wheel
+  thread and the running tasks and returns `false` on timeout.
 
 ## `Debouncer<Key, Func, Tuple, policy>` and factories
 

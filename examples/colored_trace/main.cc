@@ -5,7 +5,7 @@
 // With no SCHEDULER_TRACE_HEADER (the default), the exact same scheduler.h
 // produces no trace and no color, and those identifiers are never referenced.
 //
-// Build & run (from this directory; threadpool.hh / stash.h come from a built
+// Build & run (from this directory; work_pool.hh / stash.h come from a built
 // tree of the deps — see README.md for the full include flags):
 //   see README.md
 #include <chrono>

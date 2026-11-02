@@ -25,6 +25,7 @@
 #include <atomic>                 // for std::atomic
 #include <cassert>                // for assert
 #include <chrono>                 // for std::chrono
+#include <condition_variable>      // for std::condition_variable
 #include <cstdint>                // for std::uint8_t
 #include <memory>
 #include <mutex>                  // for std::condition_variable, std::mutex
@@ -33,7 +34,7 @@
 
 #include "stash.h"                // for StashValues, StashSlots, StashContext
 #include "thread.hh"              // for Thread, ThreadPolicyType
-#include "threadpool.hh"          // for ThreadPool
+#include "work_pool.hh"           // for WorkPool, WorkGroup
 
 // Tracing is optional and fully injectable. Define SCHEDULER_TRACE_HEADER (a
 // header path) before including this file to plug in your own logging macros
@@ -423,12 +424,34 @@ template <typename ScheduledTaskImpl, ThreadPolicyType thread_policy = ThreadPol
 class ThreadedScheduler : public BaseScheduler<ThreadedScheduler<ScheduledTaskImpl, thread_policy>, ScheduledTaskImpl, thread_policy> {
 	using TaskType = std::shared_ptr<ScheduledTask<ThreadedScheduler<ScheduledTaskImpl, thread_policy>, ScheduledTaskImpl, thread_policy>>;
 
-	ThreadPool<TaskType, thread_policy> thread_pool;
+	// The scheduler's workers: one pool of its own, one group for its tasks. No reserve: every
+	// worker runs tasks.
+	WorkPool pool;
+	WorkGroup group;
+	std::atomic_bool stopped;
+
+	// Wakes join() when the group goes idle.
+	struct IdleWait : WorkIdle {
+		std::mutex mtx;
+		std::condition_variable cv;
+		bool idle = false;
+
+		IdleWait() {
+			fn = [](WorkIdle* node) noexcept {
+				auto* self = static_cast<IdleWait*>(node);
+				std::lock_guard<std::mutex> lk(self->mtx);
+				self->idle = true;
+				self->cv.notify_all();
+			};
+		}
+	};
 
 public:
 	ThreadedScheduler(std::string name_, const char* format, size_t num_threads)  :
 		BaseScheduler<ThreadedScheduler<ScheduledTaskImpl, thread_policy>, ScheduledTaskImpl, thread_policy>(name_),
-		thread_pool(format, num_threads) {}
+		pool({.threads = static_cast<unsigned>(num_threads), .reserve = 0, .name_format = format}),
+		group(pool),
+		stopped(false) {}
 
 	~ThreadedScheduler() noexcept {
 		try {
@@ -439,25 +462,30 @@ public:
 	}
 
 	size_t threadpool_capacity() {
-		return thread_pool.threadpool_capacity();
+		return pool.threads();
 	}
 
 	size_t threadpool_size() {
-		return thread_pool.threadpool_size();
+		return pool.threads();
 	}
 
+	// Tasks executing now.
 	size_t running_size() {
-		return thread_pool.running_size();
+		return group.running();
 	}
 
+	// Tasks dispatched and not yet started.
 	size_t size() {
-		return thread_pool.size();
+		return group.pending();
 	}
 
+	// Stops the wheel and drops the tasks not yet started; the ones running finish. With a
+	// non-zero wait it also joins (see join()).
 	bool finish(int wait = 10) {
 		BaseScheduler<ThreadedScheduler<ScheduledTaskImpl, thread_policy>, ScheduledTaskImpl, thread_policy>::end(wait);
 
-		thread_pool.finish();
+		stopped.store(true, std::memory_order_release);
+		group.cancel();
 
 		if (wait != 0) {
 			return join(2 * wait * 100ms);
@@ -466,16 +494,29 @@ public:
 		return true;
 	}
 
+	// Waits for the wheel thread to exit and the running tasks to end; false on timeout.
 	bool join(std::chrono::milliseconds timeout = 60s) {
-		auto threadpool_workers = thread_pool.threadpool_workers() + 1;
-		auto single_timeout = timeout / threadpool_workers;
+		auto deadline = std::chrono::steady_clock::now() + timeout;
 
-		if (!BaseScheduler<ThreadedScheduler<ScheduledTaskImpl, thread_policy>, ScheduledTaskImpl, thread_policy>::join(single_timeout)) {
+		if (!BaseScheduler<ThreadedScheduler<ScheduledTaskImpl, thread_policy>, ScheduledTaskImpl, thread_policy>::join(timeout)) {
 			return false;
 		}
-		if (!thread_pool.join(single_timeout * threadpool_workers)) {
+
+		// The wheel has exited and posts no more; drop what its last pass dispatched.
+		group.cancel();
+		IdleWait done;
+		group.on_idle(done);
+		std::unique_lock<std::mutex> lk(done.mtx);
+		if (done.cv.wait_until(lk, deadline, [&] { return done.idle; })) {
+			return true;
+		}
+		lk.unlock();
+		if (group.cancel_idle(done)) {
 			return false;
 		}
+		// The callback is firing: let it finish with the node before it goes.
+		lk.lock();
+		done.cv.wait(lk, [&] { return done.idle; });
 		return true;
 	}
 
@@ -483,13 +524,13 @@ public:
 		if (*task) {
 			if (task->clear(true)) {
 				L_SCHEDULER("ThreadedScheduler::" + STEEL_BLUE + "RUNNING" + CLEAR_COLOR + " - now:{}, wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(task->wakeup_time.time_since_epoch()).count());
-				try {
-					// The task is now dispatched but won't run until a worker picks
-					// it up. A user clear() in that window can no longer win the
-					// one-shot CAS, so it instead flips atom_cancelled; the worker
-					// re-checks it in ScheduledTask::operator() and skips the call.
-					thread_pool.enqueue(task);
-				} catch (const std::logic_error&) { }
+				// The task is now dispatched but won't run until a worker picks
+				// it up. A user clear() in that window can no longer win the
+				// one-shot CAS, so it instead flips atom_cancelled; the worker
+				// re-checks it in ScheduledTask::operator() and skips the call.
+				if (!stopped.load(std::memory_order_acquire)) {
+					group.enqueue([task] { task->operator()(); });
+				}
 			}
 		}
 		L_SCHEDULER("ThreadedScheduler::" + BROWN + "ABORTED" + CLEAR_COLOR + " - now:{}, wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(task->wakeup_time.time_since_epoch()).count());

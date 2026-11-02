@@ -114,10 +114,11 @@ it checks the task isn't cleared, `clear()`s it (so it runs at most once), and
 calls `task->operator()()` directly. This is the right shape for short, reliable
 callbacks — Xapiand's logger thread uses it.
 
-`ThreadedScheduler<Impl, policy>` owns a `ThreadPool` and **dispatches** each due
-task to a worker (`thread_pool.enqueue(task)`), so a slow task can't stall the
-wheel. Its `finish()`/`join()` shut down the loop and the pool together, splitting
-the join timeout across the workers. The debouncer is built on this.
+`ThreadedScheduler<Impl, policy>` owns a `WorkPool` and one `WorkGroup` and
+**dispatches** each due task to the group (`group.enqueue(...)`), so a slow task can't
+stall the wheel. `finish()` stops the loop and drops the tasks not yet started; `join()`
+waits for the loop thread, then for the group to go idle (`WorkGroup::on_idle`), within
+one timeout. The debouncer is built on this.
 
 Both derive from `BaseScheduler` and differ only in `operator()(TaskType&)`.
 

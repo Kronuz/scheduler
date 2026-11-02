@@ -263,6 +263,75 @@ static void test_cancel_after_dispatch() {
 
 
 // ---------------------------------------------------------------------------
+// 2a. ThreadedScheduler's pool: every worker runs tasks at once, the counters
+//     report the load and the backlog, finish() drops what has not started,
+//     and join() times out on a running task and returns true once it ends.
+// ---------------------------------------------------------------------------
+
+struct HoldTask;
+using HoldSched = ThreadedScheduler<HoldTask, ThreadPolicyType::regular>;
+using HoldTaskBase = ScheduledTask<HoldSched, HoldTask, ThreadPolicyType::regular>;
+
+static std::atomic<bool> g_hold_release{false};
+static std::atomic<int>  g_hold_started{0};
+static std::atomic<int>  g_hold_finished{0};
+
+struct HoldTask : public HoldTaskBase {
+	void operator()() {
+		g_hold_started.fetch_add(1);
+		while (!g_hold_release.load(std::memory_order_acquire)) {
+			std::this_thread::sleep_for(2ms);
+		}
+		g_hold_finished.fetch_add(1);
+	}
+};
+
+static void test_threaded_pool_shape() {
+	g_hold_release.store(false);
+	g_hold_started.store(0);
+	g_hold_finished.store(0);
+
+	HoldSched sched("HSCHED", "HW{:02}", 3);
+	auto now = std::chrono::steady_clock::now();
+	for (int i = 0; i < 5; ++i) {
+		sched.add(std::make_shared<HoldTask>(), now + 10ms);
+	}
+	for (int i = 0; i < 200 && g_hold_started.load() < 3; ++i) {
+		std::this_thread::sleep_for(10ms);
+	}
+	std::this_thread::sleep_for(100ms);   // the other two are dispatched by now
+
+	assert(g_hold_started.load() == 3 && "all three workers run tasks at once");
+	assert(sched.threadpool_size() == 3 && sched.threadpool_capacity() == 3);
+	assert(sched.running_size() == 3);
+	assert(sched.size() == 2);
+
+	sched.finish(0);                      // drops the two not started; no join
+	assert(sched.size() == 0);
+	assert(!sched.join(200ms) && "join() reports a task that is still running");
+	g_hold_release.store(true, std::memory_order_release);
+	assert(sched.join(5s));
+	assert(g_hold_started.load() == 3 && g_hold_finished.load() == 3 && "tasks not started at finish() never ran");
+	assert(sched.running_size() == 0);
+	std::printf("threaded scheduler OK: pool shape, counters, finish() drops queued tasks, join() times out on a running one\n");
+}
+
+
+// A task that comes due while finish() is joining is dropped, not run.
+static void test_finish_drops_due_tasks() {
+	auto before = g_threaded_ran.load();
+	{
+		ThreadedSched sched("FSCHED", "FW{:02}", 2);
+		sched.add(std::make_shared<CountTask>(), std::chrono::steady_clock::now() + 100ms);
+		sched.finish();
+	}
+	std::this_thread::sleep_for(300ms);
+	assert(g_threaded_ran.load() == before && "a task due during finish() ran");
+	std::printf("threaded scheduler OK: a task due while finish() joins is dropped\n");
+}
+
+
+// ---------------------------------------------------------------------------
 // 2c. Debouncer: destructs cleanly at scope exit WITHOUT a manual finish(),
 //     while debounced calls are in flight (regression for the shutdown UAF).
 //
@@ -532,6 +601,8 @@ int main() {
 	test_add_result();
 	test_threaded_scheduler();
 	test_cancel_after_dispatch();
+	test_threaded_pool_shape();
+	test_finish_drops_due_tasks();
 	test_debouncer();
 	test_debouncer_force_window();
 	test_debouncer_rearm();

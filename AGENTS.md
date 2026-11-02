@@ -25,9 +25,9 @@ ARCHITECTURE.md             Internal design, the timing model, trade-offs.
 
 The library is header-only. Its three dependencies — [`stash`](https://github.com/Kronuz/stash)
 (the slot store), [`threadpool`](https://github.com/Kronuz/threadpool) (Thread +
-ThreadPool + ThreadPolicyType), and [`random`](https://github.com/Kronuz/random)
+WorkPool + ThreadPolicyType), and [`random`](https://github.com/Kronuz/random)
 (`random_time`) — are pulled in by `FetchContent` at their `main` tips and provide
-`stash.h`, `thread.hh`, `threadpool.hh`, and `random.hh` on the include path.
+`stash.h`, `thread.hh`, `work_pool.hh`, and `random.hh` on the include path.
 
 ## Build and run the test
 
@@ -47,7 +47,7 @@ and exposes the source dir as a `PUBLIC` include. The test target is
 - **C++20.** Required (the threadpool dep uses `std::format` for worker naming,
   and the example uses `std::format`). Don't drop below it.
 - **No Xapiand headers.** The only includes are the C++ standard library, the two
-  FetchContent'd deps (`stash.h`, `thread.hh`, `threadpool.hh`), and the bundled
+  FetchContent'd deps (`stash.h`, `thread.hh`, `work_pool.hh`), and the bundled
   headers. Do not add `log.h`, `colors.h`, `strings.hh`, etc. back; routing
   through the trace hooks is exactly what replaced them.
 - **Tracing flows through four injectable macros**, all no-ops by default:
@@ -133,7 +133,7 @@ and exposes the source dir as a `PUBLIC` include. The test target is
 - **The deps track `main`.** `CMakeLists.txt` fetches `stash` and `threadpool` at
   their tips, so a change there reaches this build (the nightly CI run catches
   drift). The wheel relies on `stash`'s `StashSlots`/`StashValues` API and the scheduler
-  on `threadpool`'s `Thread`/`ThreadPool`/`ThreadPolicyType`.
+  on `threadpool`'s `Thread`/`WorkPool`/`WorkGroup`/`ThreadPolicyType`.
 
 ## Standalone vs. Xapiand
 
@@ -144,7 +144,7 @@ decoupling:
 - `scheduler.h` and `debouncer.h` dropped `#include "log.h"`. The four trace
   macros (`L_SCHEDULER`, `L_DEBUG_HOOK`, `L_EXC`, `L_CALL`) now resolve through
   `scheduler_trace.h` (no-op by default). The `stash.h`, `thread.hh`,
-  `threadpool.hh` includes are unchanged but now resolve to the FetchContent'd
+  `work_pool.hh` includes now resolve to the FetchContent'd
   standalone libraries.
 - The uniform-random helpers come from the
   [random](https://github.com/Kronuz/random) library, as in Xapiand.

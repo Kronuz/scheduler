@@ -6,8 +6,8 @@ include(FetchContent)
 # --- Dependencies ---
 # The scheduler is built on three already-extracted standalone libraries:
 #   stash       — the lock-free hierarchical slot store (the timer-wheel primitive)
-#   threadpool  — Thread<Impl,policy> + ThreadPolicyType + ThreadPool (+ TaskQueue)
-# Both are public (consumers see stash.h / thread.hh / threadpool.hh on their
+#   threadpool  — Thread<Impl,policy> + ThreadPolicyType + WorkPool/WorkGroup
+# Both are public (consumers see stash.h / thread.hh / work_pool.hh on their
 # include path), tracking their default-branch tips.
 FetchContent_Declare(
   stash
@@ -17,7 +17,7 @@ FetchContent_Declare(
 FetchContent_Declare(
   threadpool
   GIT_REPOSITORY https://github.com/Kronuz/threadpool.git
-  GIT_TAG        628679a2e27b563cf2709a6f35f98f1657baf7b3
+  GIT_TAG        44551e51a1baf3daacab1161fc846185e5faee34
 )
 FetchContent_MakeAvailable(stash threadpool)
 # random_time (the debouncer's force window) comes from the random library; reuse
@@ -71,5 +71,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   if(SCHEDULER_BENCH)
     add_executable(scheduler_bench_churn bench/bench_churn.cc)
     target_link_libraries(scheduler_bench_churn PRIVATE scheduler)
+
+    add_executable(scheduler_bench_pool bench/bench_pool.cc)
+    target_link_libraries(scheduler_bench_pool PRIVATE scheduler)
   endif()
 endif()
