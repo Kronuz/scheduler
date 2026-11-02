@@ -132,20 +132,21 @@ in the same order from the wheel and from the queue (due time, then arming order
 
 | Machine, producers | make only | `add()` | `post()` | `post_ordered()` | queue |
 |---|---:|---:|---:|---:|---:|
-| Apple M4 Pro, 1 | 37 to 39 | 165 to 166 | 43 | 43 | 102 to 103 |
-| Apple M4 Pro, 4 | 44 | 655 to 656 | 597 to 679 | 571 to 651 | 1,177 to 1,204 |
-| Intel Core i9-9980HK, 1 | 136 | 387 to 396 | 142 | 140 to 146 | 308 to 310 |
-| Intel Core i9-9980HK, 4 | 141 to 146 | 602 to 612 | 256 to 282 | 264 to 280 | 3,680 to 3,691 |
+| Apple M4 Pro, 1 | 31 | 135 to 144 | 37 | 37 | 97 |
+| Apple M4 Pro, 4 | 35 to 37 | 568 to 622 | 642 to 650 | 588 to 627 | 1,021 to 1,043 |
+| Intel Core i9-9980HK, 1 | 128 to 129 | 373 to 380 | 124 to 127 | 120 to 126 | 267 to 277 |
+| Intel Core i9-9980HK, 4 | 119 to 120 | 580 to 584 | 266 to 299 | 270 to 310 | 3,439 to 3,442 |
 
-A task is 72 bytes (`sizeof(ScheduledTask)` on a 64-bit target), and *make only* is what its
-allocation and construction cost every caller, whichever call arms it. With one producer the
-queue's push is cheaper than `add()`, and `post()` is cheaper than both; with four producers the
-queue's one mutex costs about twice `add()` on the M4 Pro and six times on the i9. Running 200,000
-tasks due at one instant, from the first run to the last, the queue is faster: 60 to 62 ns per task
-against 64 to 65 for the wheel on the M4 Pro, and 125 to 130 against 213 to 235 on the i9.
+A task is 56 bytes (`sizeof(ScheduledTask)` on a 64-bit target) and does not derive
+`std::enable_shared_from_this`; *make only* is what its allocation and construction cost every
+caller, whichever call arms it. With one producer the queue's push is cheaper than `add()`, and
+`post()` is cheaper than both; with four producers the queue's one mutex costs 1.7 times `add()`
+on the M4 Pro and six times on the i9. Running 200,000 tasks due at one instant, from the first run
+to the last, the queue is faster: 60 to 62 ns per task against 65 to 67 for the wheel on the M4 Pro,
+and 115 to 119 against 232 to 235 on the i9.
 
 Apple M4 Pro (arm64), macOS 26.7.2, and Intel Core i9-9980HK (x86_64), macOS 15.8.1, both with
-Apple clang 17.0.0 and `-O3 -DNDEBUG`, at `eb2483b`:
+Apple clang 17.0.0 and `-O3 -DNDEBUG`, at `e7b4f83`:
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DSCHEDULER_BENCH=ON

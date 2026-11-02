@@ -7,17 +7,42 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- `ScheduledTask` is 72 bytes on a 64-bit target, from 96 (it was 48 before `post()`). Every task a
-  caller makes paid for the fields of `post()`, posted or not, and `make only` (`std::make_shared`
-  of a trivial task and a clock reading) was the one row slower than the commit before `post()`
-  (`ae3f0f9`). The stack link and the owning reference a task holds while it waits on `post()`'s
-  stack, and the filing number and tick it gets once the worker has filed it, never coexist, so
-  they share one 24-byte union (`hand`, with `begin_posted()` and `end_posted()` for the stages),
-  and `post_ordered` sits in the padding after `atom_cancelled`. libc++ puts 24 bytes of control
-  block in front of the task, so the allocation is 96 bytes where it was 128 (and 80 at `ae3f0f9`).
-  `make only`, ns per task, 15 interleaved runs per binary in one `quiet strict` hold per machine
-  (START `ae3f0f9`, before `80d640f`, after; the ratio is START over the row, the A/A is START
-  against START again):
+- `ScheduledTask` is 56 bytes (it was 72) and no longer derives `std::enable_shared_from_this`. That
+  closes the `make only` row that stayed 4% above the commit before `post()` (`ae3f0f9`) with four
+  producers on the Apple M4 Pro (scheduler#2), and puts the row 10 to 15% below that commit on both
+  machines.
+  **API:** a task no longer has `shared_from_this()` or `weak_from_this()`; a task that needs its
+  owner derives `std::enable_shared_from_this` from its own type (`test/task_size.cc` does).
+  Nothing in this repository or in logger calls either on a task. Two things made the row slower.
+  The size class: libc++ puts 24 bytes of control block in front of what `make_shared` builds, so
+  START's 48-byte task was an 80-byte allocation, the 72-byte task is 96 and the 96-byte task 128;
+  START's header with 8, 16 and 24 bytes added (probes, ns per task, 1 and 4 producers) reads 35.8
+  and 40.5, 36.3 and 42.8, 36.1 and 43.0 on the M4 Pro, against START's 35.9 and 40.4. And the base
+  itself: it is 16 bytes in every task, and `make_shared` increments the control block's weak count to
+  fill it, an atomic read-modify-write on every task. The 56-byte task without it is 14% faster than
+  56 bytes with it on the M4 Pro (30.7 against 35.8 ns, one producer). `make only`, 15 interleaved runs
+  per binary in one `quiet strict` hold per machine (START `ae3f0f9`, the 72-byte task of `eb2483b`,
+  the 56-byte task; the ratio is START over the row, the A/A is START against START again):
+
+  | | START | 72 bytes | 56 bytes | START / 72 | START / 56 | A/A |
+  |---|---:|---:|---:|---:|---:|---:|
+  | Apple M4 Pro, 1 producer | 35.9 | 36.8 | 30.7 | 0.978 | 1.170 | 1.000 |
+  | Apple M4 Pro, 4 producers | 40.4 | 43.3 | 35.6 | 0.960 | 1.131 | 0.988 |
+  | Intel i9-9980HK, 1 producer | 134.8 | 137.2 | 119.8 | 0.985 | 1.154 | 0.977 |
+  | Intel i9-9980HK, 4 producers | 139.5 | 141.6 | 125.8 | 0.988 | 1.115 | 0.993 |
+
+  The `add`, `post` and `post_ordered` rows of `scheduler_bench_post` (one and four producers), the
+  72-byte task against the 56-byte one with an A/A, four runs: +0.4% to +14% on the M4 Pro and +0.3%
+  to +16% on the i9, except post_ordered with four producers on the M4 Pro at -8.5% (range 0.87 to
+  1.08, A/A 1.011; that row's spread within one run is 25 to 35%).
+- `ScheduledTask` is 72 bytes, from 96 (it was 48 before `post()`). Every task a
+  caller made paid for the fields of `post()`, posted or not. The stack link and the owning reference a
+  task holds while it waits on `post()`'s stack, and the filing number and tick it gets once the
+  worker has filed it, never coexist, so they share one 24-byte union (`hand`, with `begin_posted()`
+  and `end_posted()` for the stages), and `post_ordered` sits in the padding after `atom_cancelled`.
+  `make only` (`std::make_shared` of a trivial task and a clock reading), ns per task, 15 interleaved
+  runs per binary in one `quiet strict` hold per machine (START `ae3f0f9`, before `80d640f`, after; the
+  ratio is START over the row, the A/A is START against START again):
 
   | | START | before | after | START / before | START / after | A/A |
   |---|---:|---:|---:|---:|---:|---:|
@@ -26,16 +51,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   | Intel i9-9980HK, 1 producer | 137.9 | 144.2 | 133.7 | 0.965 | 1.015 | 1.034 |
   | Intel i9-9980HK, 4 producers | 142.8 | 148.4 | 141.6 | 0.951 | 1.017 | 0.999 |
 
-  The i9 is back to START. The M4 Pro with four producers stays 4% above it: the task would have to
-  be 56 bytes to land in START's 80-byte allocation class, which needs the hand-off fields out of the
-  task (scheduler#2). The other rows of `scheduler_bench_post` (add, post, post_ordered, one and
-  four producers), before against after with an A/A: -1.2% to +12% on the M4 Pro, -1.1% to +12% on
-  the i9, none slower beyond the A/A spread.
-- `test/task_size.cc` (`scheduler_task_size`): the task is 72 bytes, the posted stage holds the task
-  and gives the hold up once, and the filed stage reads zero for a task never posted and after a
-  posted stage ends. With the old layout the size check fails (96, not 72). With `end_posted()` not
-  zeroing the filed stage the stage test fails, and with `begin_posted()` not taking the hold
-  `scheduler_post` crashes.
+  The i9 was back at START and the M4 Pro with four producers stayed 4% above it (scheduler#2).
+  The other rows of `scheduler_bench_post` (add, post, post_ordered, one and four producers), before
+  against after with an A/A: -1.2% to +12% on the M4 Pro, -1.1% to +12% on the i9, none slower
+  beyond the A/A spread.
+- `test/task_size.cc` (`scheduler_task_size`): the task is 56 bytes, the posted stage holds the task
+  and gives the hold up once, the filed stage reads zero for a task never posted and after a posted
+  stage ends, and a task that derives `std::enable_shared_from_this` itself is scheduled and runs.
+  With the 72-byte layout the size check fails. With `end_posted()` not zeroing the filed stage the
+  stage test fails, and with `begin_posted()` not taking the hold `scheduler_post` crashes.
 
 ### Tests
 
