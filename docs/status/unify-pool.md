@@ -47,7 +47,7 @@
 - Findings on the way: CI's Linux ASan run caught the no_memory test's operator new replacement missing the nothrow forms
   (the pool's box uses `new (std::nothrow)`): fixed in `test/no_memory.cc`. CI's FreeBSD run caught a timing flake in
   threadpool `work_group.cc` case 4 (a flush ended before the query looked; not caused by this work): the test now holds the flushes.
-- CI (workflow_dispatch on the branch): threadpool run 41518748791 all jobs green; scheduler run 41518757480 all jobs green (macos-arm64 ran after a runner-capacity cancel).
+- CI (workflow_dispatch on the branch, merged tree): threadpool run 41542646368 and scheduler run 41542683108, all jobs green. A first threadpool run on the merge failed Linux TSan on a relaxed counter in `work_pool.cc` (fixed: release increment).
 
 ## Review follow-up
 
