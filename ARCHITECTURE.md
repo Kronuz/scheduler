@@ -72,7 +72,7 @@ boundary, so a task that is overdue but not yet run is never reclaimed.
 
 ### `ScheduledTask` — the cancellable unit
 
-A CRTP, `enable_shared_from_this` task carrying a `wakeup_time` and two atomic
+A CRTP task carrying a `wakeup_time` and two atomic
 timestamps (`atom_created_at`, `atom_cleared_at`). `operator bool()` reports "not
 yet cleared." `clear()` cancels with a single `compare_exchange_strong` on
 `atom_cleared_at`: the first caller wins and returns true, every later caller

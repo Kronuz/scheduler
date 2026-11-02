@@ -2,7 +2,8 @@
 
 ## `ScheduledTask<SchedulerImpl, ScheduledTaskImpl, ThreadPolicyType policy = regular>`
 
-CRTP base for a cancellable scheduled task.
+CRTP base for a cancellable scheduled task. It is 56 bytes and does not derive
+`std::enable_shared_from_this`: keep the `std::shared_ptr` you make it with.
 
 - `operator bool()` — true while not yet cleared.
 - `clear() -> bool` — cancel; the first call wins a CAS and returns true, later

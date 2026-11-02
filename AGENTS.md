@@ -16,7 +16,7 @@ test/test.cc                Tests: inline Scheduler order, clear() cancel, Threa
 test/soak.cc                Lost-task soak (`scheduler_soak`): any task that never fires fails it.
 test/post.cc                post() and post_ordered(): order (one thread, across threads, mixed delays against the wheel's oracle), cancel, wake, horizon, many producers, finish() racing the posters.
 test/handshake_model.cc     add()'s side of the sleep handshake, read from scheduler.h, against a store-buffer model of the worker's pass.
-test/task_size.cc           ScheduledTask is 72 bytes, and the posted and filed stages of its hand-off fields share storage (`scheduler_task_size`).
+test/task_size.cc           ScheduledTask is 56 bytes, and the posted and filed stages of its hand-off fields share storage (`scheduler_task_size`).
 test/no_memory.cc           Allocation failure (`scheduler_no_memory`): add() and debounce() report it; a refused block in the worker's arrival queue runs a due task, drops the others and leaves the worker running. Not built under TSan (it replaces operator new).
 bench/bench_post.cc         What a producer pays to arm a task: add(), post(), post_ordered() (`SCHEDULER_BENCH`).
 examples/colored_trace/     Runnable demo that injects a real trace header to restore colored, formatted trace output.
@@ -120,15 +120,20 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   (the Dekker pair: poster pushes then loads `sleeping`, worker stores `sleeping` then loads
   `posted`, all seq_cst), and after it wakes, before it fires. A task is posted once and never also
   added; `hand` and `post_ordered` belong to the hand-off.
-- **A task is 72 bytes, and every task a caller makes pays for them.** The posted stage of `hand`
+- **A task is 56 bytes, and every task a caller makes pays for them.** libc++ puts 24 bytes of control
+  block in front of what `make_shared` builds, so 56 bytes is an 80-byte allocation: the size class
+  every task had before `post()` existed (48 bytes), and one more field is the next class up and
+  `make only` slows by 4% with four producers on the M4 Pro (`scheduler_bench_post`; CHANGELOG.md). The posted stage of `hand`
   (the link and the hold) and its filed stage (`seq`, `tick`: the filing number and tick that merge
   the arrival queue with the wheel) are one 24-byte union, because they never overlap: the worker ends the
   posted stage (`end_posted()`, which returns the hold and leaves the filed stage zero) before it
   writes the filed one, and a task never posted reads zero there, which `before()` takes for "never
-  filed". Do not add a field beside them without measuring `make only` in `scheduler_bench_post`: kept
-  as separate fields they make a task 96 bytes, and `make only` slows (CHANGELOG.md has the cost).
-  Keep `post_ordered` in the padding after `atom_cancelled`. `scheduler_task_size` checks the size
-  and the stages.
+  filed". Keep `post_ordered` in the padding after `atom_cancelled`. `scheduler_task_size` checks the
+  size and the stages.
+- **A task does not derive `std::enable_shared_from_this`.** The base is 16 bytes in every task and
+  `make_shared` increments the control block's weak count to fill it, an atomic read-modify-write that
+  `make only` pays on every task (12 to 14% of the row on the M4 Pro). Nothing in the library or in
+  logger calls `shared_from_this()` on a task; a task that needs its owner is handed the pointer.
 - **`finish()` closes the stack on every exit of the worker loop.** When the worker finds nothing
   due and `finish()` has begun it exchanges a closed mark into `posted` and files what it held;
   when the countdown reaches zero (or `finish(0)`) it does the same after the loop and runs what

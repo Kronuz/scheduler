@@ -99,7 +99,7 @@ class ThreadedScheduler;
 
 
 template <typename SchedulerImpl, typename ScheduledTaskImpl, ThreadPolicyType thread_policy = ThreadPolicyType::regular>
-class ScheduledTask : public std::enable_shared_from_this<ScheduledTask<SchedulerImpl, ScheduledTaskImpl, thread_policy>> {
+class ScheduledTask {
 	friend BaseScheduler<SchedulerImpl, ScheduledTaskImpl, thread_policy>;
 	friend Scheduler<ScheduledTaskImpl, thread_policy>;
 	friend ThreadedScheduler<ScheduledTaskImpl, thread_policy>;

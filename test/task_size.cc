@@ -1,16 +1,22 @@
 // The size of ScheduledTask and the two stages of its hand-off fields.
 //
-//   1. A task is 72 bytes on a 64-bit target: the 48 it had before post() plus the 24 bytes of the
-//      hand-off fields. Every task a caller makes pays for its bytes, in the allocation and in what its
-//      constructor writes, so a field added beside them fails this.
+//   1. A task is 56 bytes on a 64-bit target: 8 each for the wakeup, created and cleared times and the
+//      flags, plus the 24 bytes of the hand-off fields. Every task a caller makes pays
+//      for its bytes, in the allocation and in what its constructor writes (libc++ puts 24 bytes of control
+//      block in front, so 56 bytes is an 80-byte allocation), so a field added beside them fails this.
 //   2. The hand-off fields (the posted stage) and the filing fields (the filed stage) share storage.
 //      A task that was never posted, and one whose posted stage has ended, read zero as filed: that is
 //      what BaseScheduler::before() takes for "never filed", and a stale link would order it wrongly.
 //   3. The posted stage holds the task until the worker takes the hold, and takes it exactly once.
+//   4. A task does not derive std::enable_shared_from_this (a base costs 16 bytes and an atomic increment
+//      in every make_shared); one that needs its owner derives it from its own type.
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <thread>
 
 #include "scheduler.h"
 
@@ -40,8 +46,33 @@ static ProbeBase* address(std::uintptr_t value) {
 static void test_size() {
 	std::printf("sizeof(ScheduledTask) %zu\n", sizeof(ProbeBase));
 	if (sizeof(void*) == 8) {
-		CHECK(sizeof(ProbeBase) == 72);
+		CHECK(sizeof(ProbeBase) == 56);
 	}
+}
+
+struct Owned;
+using OwnedSched = Scheduler<Owned, ThreadPolicyType::regular>;
+struct Owned : ScheduledTask<OwnedSched, Owned, ThreadPolicyType::regular>, std::enable_shared_from_this<Owned> {
+	std::atomic<int>* ran;
+	explicit Owned(std::atomic<int>* ran) : ran(ran) {}
+	void operator()() {
+		ran->fetch_add(1);
+	}
+};
+
+// A task that needs its owner derives std::enable_shared_from_this itself, and is scheduled from it.
+static void test_owner() {
+	std::atomic<int> ran{0};
+	auto task = std::make_shared<Owned>(&ran);
+	CHECK(task->shared_from_this().get() == task.get());
+	OwnedSched sched("OWNED");
+	CHECK(sched.add(task->shared_from_this(), std::chrono::steady_clock::now() + std::chrono::milliseconds(5)) == schedule_result::scheduled);
+	for (int i = 0; i < 5000 && ran.load() == 0; ++i) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	CHECK(ran.load() == 1);
+	sched.finish();
+	std::printf("owned task OK\n");
 }
 
 static void test_stages() {
@@ -83,6 +114,7 @@ static void test_stages() {
 int main() {
 	test_size();
 	test_stages();
+	test_owner();
 	std::printf("all task size tests passed\n");
 	return 0;
 }
