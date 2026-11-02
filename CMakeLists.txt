@@ -17,7 +17,7 @@ FetchContent_Declare(
 FetchContent_Declare(
   threadpool
   GIT_REPOSITORY https://github.com/Kronuz/threadpool.git
-  GIT_TAG        0983f2d6805df8b75d5473c3bc39675e45418059
+  GIT_TAG        db3859497829b83108a76b557f0522a8b9a7b872
 )
 FetchContent_MakeAvailable(stash threadpool)
 # random_time (the debouncer's force window) comes from the random library; reuse

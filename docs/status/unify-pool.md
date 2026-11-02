@@ -5,7 +5,7 @@
 - Task: `ThreadedScheduler` runs on a `WorkPool` and one `WorkGroup`; `ThreadPool` is no longer used here.
 - Branch: `phase7c/unify-pool`, merged with main `scheduler:2bb0a8f` (review CR1); pins the threadpool branch head (see `CMakeLists.txt`).
 - Commit: `scheduler:c502949`. Review: `docs/reviews/unify-pool-code.md` (approve with conditions).
-- State: tests, mutants, sanitizers, A/A bench and CI done; waiting for the review.
+- State: landed on main (`scheduler:d94f287`). Step 4 on branch `phase7c/drop-threadpool`: pin threadpool at its drop-threadpool head (see below).
 
 ## Change
 
@@ -57,6 +57,12 @@
 - CR6: a dispatch the pool cannot allocate is counted: `ThreadedScheduler::refused_size()`. A log line would allocate under the
   failure, so there is none. `test/no_memory.cc` injects a nothrow failure; the mutant "refusal not counted" fails it.
 - CR7 goes to the lead: thread policies are ignored at run time.
+
+## Step 4: repin on the threadpool without `ThreadPool` (branch `phase7c/drop-threadpool`)
+
+- `CMakeLists.txt` pins threadpool `db38594` (branch `phase7c/drop-threadpool`, which deletes the `ThreadPool` family and trims
+  `ThreadPolicyType` to `regular` and `logging`). The scheduler used neither; nothing else changes. `ThreadPolicyType::regular` is
+  the only value any file here names.
 
 ## Next
 
