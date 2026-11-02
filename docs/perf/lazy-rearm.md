@@ -1,6 +1,6 @@
 # Lazy re-arm for the debouncer
 
-Branch `perf/lazy-rearm` from main `fb464cb`. Prototype for review, not merged.
+Measured on branch `perf/lazy-rearm` from main `fb464cb`.
 
 ## Target
 
@@ -33,7 +33,7 @@ with its last touch's sequence (the bench exits nonzero otherwise).
 
 Runs were interleaved main, re-arm, main, re-arm for each key count, three rounds in all (the
 first without the CPU counter and the sequence check, the third with both), under light holds on
-macOS x86_64 (i9-9980HK). Logs: `.scratch/logs/churn_ab.log`, `churn_cpu.log`, `churn_final.log`.
+macOS x86_64 (i9-9980HK). The logs are not kept; the tables below carry their medians.
 
 ## Results
 

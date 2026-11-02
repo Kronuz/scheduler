@@ -3,8 +3,8 @@
 # unify-pool (scheduler)
 
 - Task: `ThreadedScheduler` runs on a `WorkPool` and one `WorkGroup`; `ThreadPool` is no longer used here.
-- Branch: `phase7c/unify-pool`, from main `scheduler:2cbea95`; pins `threadpool:44551e5` (`phase7c/unify-pool`).
-- Commit: `scheduler:c502949`. Review: none yet (the lead launches it).
+- Branch: `phase7c/unify-pool`, merged with main `scheduler:2bb0a8f` (review CR1); pins the threadpool branch head (see `CMakeLists.txt`).
+- Commit: `scheduler:c502949`. Review: `docs/reviews/unify-pool-code.md` (approve with conditions).
 - State: tests, mutants, sanitizers, A/A bench and CI done; waiting for the review.
 
 ## Change
@@ -28,18 +28,19 @@
 - Mutants (`.scratch/mut.sh`, each fails the test): finish keeps queued tasks (`sched.size() == 0`); dispatch after finish
   (`test_finish_drops_due_tasks`); join does not wait for the group; join never times out (`!sched.join(200ms)`);
   `running_size()` returns the backlog; `size()` returns the load; the pool keeps a reserve (`g_hold_started == 3`).
-- Bench, i9 Mac, `quiet strict`, 6 cycles x 3 binaries interleaved (base, new, and base again as the A/A control), medians of 5
-  (`add`, `fire`) and 7 (`log`) rounds per process, raw in `docs/status/unify-pool/ab.txt`, `bench/bench_pool.cc`, 4 workers, 200,000 tasks:
+- Bench, i9 Mac, `quiet strict`, 6 cycles x 3 binaries interleaved (main, new, and main again as the A/A control), medians of 5
+  (`add`, `fire`) and 7 (`log`) rounds per process, base = scheduler main `2bb0a8f`, 4 workers, 200,000 tasks, raw in
+  `docs/status/unify-pool/ab-main.txt` (`bench/bench_pool.cc`; the first run against the old base `2cbea95` is `ab.txt`, superseded
+  by review CR1):
 
-  | row | base `2cbea95` | A/A control | new |
+  | row | main `2bb0a8f` | A/A control | new |
   |---|---:|---:|---:|
-  | `add()` 1 producer, ns | 196.6 (194 to 201) | 204.4 (196 to 213) | 205.4 (200 to 230) |
-  | fire 200,000 tasks due at once, ns/task | 5681 (5624 to 5909) | 5696 (5571 to 5758) | 480 (465 to 516) |
-  | logger `L_INFO`, 1 producer, ns | 671.7 (649 to 715) | 689.2 (634 to 719) | 672.6 (660 to 703) |
+  | `add()` 1 producer, ns | 189.6 (179 to 205) | 183.8 (178 to 187) | 182.1 (178 to 200) |
+  | fire 200,000 tasks due at once, ns/task | 2522 (2457 to 2640) | 2570 (2429 to 2599) | 443 (422 to 454) |
+  | logger `L_INFO`, 1 producer, ns | 568.2 (557 to 588) | 551.1 (531 to 584) | 555.4 (545 to 665) |
 
-  `add()` and `L_INFO` do not touch the pool: new is within the control's spread. Firing a backlog through the pool is 11.8x faster
-  (the old pool woke a sleeper per task). `L_INFO` bench: `.scratch/logbench` (logger main with the scheduler overridden).
-
+  `add()` and `L_INFO` do not touch the pool: new is within the control's spread. Firing a backlog through the pool is 5.7x faster.
+  `L_INFO` bench: `.scratch/logbench` (logger main with the scheduler overridden).
 - Sanitizers: `preflight.sh` (mac hardened, mac ASan+UBSan, Linux and FreeBSD VMs) ok on both repos at the branch heads;
   TSan (Homebrew LLVM, `-O1`) clean on `scheduler_test` and on threadpool's `work_counts`, `work_group`, `work_pool`, `work_wait`,
   `work_scheduling`. `scheduler_no_memory` skips TSan by design.
@@ -47,6 +48,15 @@
   (the pool's box uses `new (std::nothrow)`): fixed in `test/no_memory.cc`. CI's FreeBSD run caught a timing flake in
   threadpool `work_group.cc` case 4 (a flush ended before the query looked; not caused by this work): the test now holds the flushes.
 - CI (workflow_dispatch on the branch): threadpool run 41518748791 all jobs green; scheduler run 41518757480 all jobs green (macos-arm64 ran after a runner-capacity cancel).
+
+## Review follow-up
+
+- CR1: merged `origin/main` (conflicts in `AGENTS.md`, `CMakeLists.txt`); ctest 8/8 (post, soak, task_size, handshake_model, no_memory
+  included), TSan ctest 7/7, the seven mutants again, the A/B above.
+- CR4/condition 2: `docs/API.md` says not to destroy a `ThreadedScheduler` or `Debouncer` from one of its own tasks.
+- CR6: a dispatch the pool cannot allocate is counted: `ThreadedScheduler::refused_size()`. A log line would allocate under the
+  failure, so there is none. `test/no_memory.cc` injects a nothrow failure; the mutant "refusal not counted" fails it.
+- CR7 goes to the lead: thread policies are ignored at run time.
 
 ## Next
 

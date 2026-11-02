@@ -22,6 +22,24 @@
 #include <thread>
 #include <vector>
 
+// The worker parks at a named point of its loop when a test arms the gate, so the
+// add()/sleep races below are deterministic instead of one in millions.
+struct WorkerGate {
+	std::atomic<int> armed{0};     // 1: park the worker at the next "after_peep" that finds its published wakeup stale
+	std::atomic<int> parked{0};    // 1: the worker is parked
+	std::atomic<int> released{0};  // 1: let it go
+};
+static WorkerGate g_gate;
+static void worker_gate(const char* site, bool stale) {
+	if (site[0] == 'a' && stale && g_gate.armed.exchange(0) == 1) {
+		g_gate.parked.store(1);
+		while (g_gate.released.load() == 0) {
+			std::this_thread::sleep_for(std::chrono::microseconds(100));
+		}
+	}
+}
+#define SCHEDULER_TEST_HOOK(site, stale) worker_gate(site, stale)
+
 #include "debouncer.h"
 #include "scheduler.h"
 
@@ -183,8 +201,8 @@ static void test_threaded_scheduler() {
 
 // ---------------------------------------------------------------------------
 // 2b. ThreadedScheduler: a task cancelled AFTER it was dispatched to the worker
-//     pool, but BEFORE it runs, must NOT fire (regression for the cancelled-
-//     after-dispatch UAF/contract bug).
+//     pool, but BEFORE it runs, must NOT fire (firing it breaks the cancel
+//     contract and can use freed state).
 //
 //     The race is hard to hit by luck, so we force the window: a single-worker
 //     pool is occupied by a blocker task that parks on an atomic gate. While the
@@ -333,12 +351,12 @@ static void test_finish_drops_due_tasks() {
 
 // ---------------------------------------------------------------------------
 // 2c. Debouncer: destructs cleanly at scope exit WITHOUT a manual finish(),
-//     while debounced calls are in flight (regression for the shutdown UAF).
+//     while debounced calls are in flight (no use-after-free at shutdown).
 //
 //     The debounced callback touches a heap-allocated counter through a
 //     captured pointer; if the derived Debouncer members were torn down before
 //     the worker/scheduler threads were joined, an in-flight task would read
-//     freed state. A clean run (especially under ASan) exercises the fix.
+//     freed state. A clean run (especially under ASan) shows the join order holds.
 // ---------------------------------------------------------------------------
 
 static void test_debouncer_destructor_teardown() {
@@ -595,11 +613,97 @@ static void test_debouncer_touch_after_finish() {
 	std::printf("debouncer OK: a touch after finish() on a pending key returns stopping\n");
 }
 
+// A task due before the worker's sleep target wakes the sleeping worker: it must
+// fire on time, not when the (5 s) target arrives.
+static std::atomic<int> g_wake_ran{0};
+struct WakeTask;
+using WakeTaskBase = ScheduledTask<Scheduler<WakeTask, ThreadPolicyType::regular>, WakeTask, ThreadPolicyType::regular>;
+struct WakeTask : public WakeTaskBase {
+	using WakeTaskBase::WakeTaskBase;
+	void operator()() { g_wake_ran.fetch_add(1, std::memory_order_relaxed); }
+};
+
+static void test_earlier_task_wakes_sleeper() {
+	Scheduler<WakeTask, ThreadPolicyType::regular> sched("WAKE");
+	for (int round = 0; round < 10; ++round) {
+		std::this_thread::sleep_for(20ms);   // let the worker go to sleep
+		g_wake_ran.store(0);
+		auto far = std::make_shared<WakeTask>();
+		auto soon = std::make_shared<WakeTask>();
+		sched.add(far, std::chrono::steady_clock::now() + 5s);
+		sched.add(soon, std::chrono::steady_clock::now() + 30ms);
+		for (int i = 0; i < 200 && g_wake_ran.load() < 1; ++i) {
+			std::this_thread::sleep_for(10ms);
+		}
+		if (g_wake_ran.load() != 1) {
+			std::fprintf(stderr, "an earlier task waited out the sleep target\n");
+			std::abort();
+		}
+		far->clear();
+	}
+	sched.finish();
+	std::printf("earlier task wakes the sleeping worker OK\n");
+}
+
+// The lost task: the worker finishes a pass, peeps (nothing due), and is about to
+// publish its next wakeup. A task added in that window, while the published wakeup
+// time is stale (already past, so add() has nothing to lower) and the worker is not
+// yet asleep (so add() does not signal), must fire at once, not after the worker's
+// full 30 s idle target.
+static std::atomic<int> g_race_ran{0};
+static std::atomic<int> g_arm_on_run{0};   // the next task to run arms the gate: the worker parks right after it
+struct RaceTask;
+using RaceTaskBase = ScheduledTask<Scheduler<RaceTask, ThreadPolicyType::regular>, RaceTask, ThreadPolicyType::regular>;
+struct RaceTask : public RaceTaskBase {
+	using RaceTaskBase::RaceTaskBase;
+	void operator()() {
+		if (g_arm_on_run.exchange(0) == 1) {
+			g_gate.armed.store(1);
+		}
+		g_race_ran.fetch_add(1, std::memory_order_relaxed);
+	}
+};
+
+static void test_add_between_peep_and_sleep() {
+	Scheduler<RaceTask, ThreadPolicyType::regular> sched("RACE");
+	std::this_thread::sleep_for(50ms);   // let the worker finish its first pass and sleep
+	for (int round = 0; round < 5; ++round) {
+		g_race_ran.store(0);
+		g_gate.parked.store(0);
+		g_gate.released.store(0);
+		g_arm_on_run.store(1);
+		// A task a few ms out wakes the worker; once it has run, the worker loops,
+		// peeps an empty wheel and parks at the gate with a stale wakeup published.
+		sched.add(std::make_shared<RaceTask>(), std::chrono::steady_clock::now() + 5ms);
+		for (int i = 0; i < 2000 && g_gate.parked.load() == 0; ++i) {
+			std::this_thread::sleep_for(1ms);
+		}
+		if (g_gate.parked.load() == 0) {
+			std::fprintf(stderr, "the worker never reached the gate\n");
+			std::abort();
+		}
+		sched.add(std::make_shared<RaceTask>(), std::chrono::steady_clock::now());
+		g_gate.released.store(1);
+		for (int i = 0; i < 300 && g_race_ran.load() < 2; ++i) {
+			std::this_thread::sleep_for(10ms);
+		}
+		if (g_race_ran.load() != 2) {
+			std::fprintf(stderr, "a task added between the worker's peep and its sleep was lost (ran %d of 2)\n", g_race_ran.load());
+			std::abort();
+		}
+	}
+	sched.finish();
+	std::printf("add between peep and sleep OK\n");
+}
+
+
 int main() {
 	test_inline_scheduler();
 	test_clear_cancels();
 	test_add_result();
 	test_threaded_scheduler();
+	test_earlier_task_wakes_sleeper();
+	test_add_between_peep_and_sleep();
 	test_cancel_after_dispatch();
 	test_threaded_pool_shape();
 	test_finish_drops_due_tasks();

@@ -12,13 +12,18 @@ scheduler.h                 The timer wheel: ScheduledTask, SchedulerQueue, Base
 debouncer.h                 Debouncer, DebouncerTask, make_(unique_/shared_)debouncer factories. Header.
 callable_traits.hh          Callable introspection (return/args/arity). Copied verbatim from Xapiand; zero deps. Header.
 scheduler_trace.h           No-op L_NOTHING / L_DEBUG_HOOK / L_EXC / L_CALL hooks (stand in for Xapiand's log.h/colors.h).
-test/test.cc                Tests: inline Scheduler order, clear() cancel, ThreadedScheduler, Debouncer collapse and force window.
+test/test.cc                Tests: inline Scheduler order, clear() cancel, ThreadedScheduler, Debouncer collapse and force window, the add-between-peep-and-sleep race (via SCHEDULER_TEST_HOOK).
+test/soak.cc                Lost-task soak (`scheduler_soak`): any task that never fires fails it.
+test/post.cc                post() and post_ordered(): order (one thread, across threads, mixed delays against the wheel's oracle), cancel, wake, horizon, many producers, finish() racing the posters.
+test/handshake_model.cc     add()'s side of the sleep handshake, read from scheduler.h, against a store-buffer model of the worker's pass.
+test/task_size.cc           ScheduledTask is 56 bytes, and the posted and filed stages of its hand-off fields share storage (`scheduler_task_size`).
+test/no_memory.cc           Allocation failure (`scheduler_no_memory`): add() and debounce() report it; a refused block in the worker's arrival queue runs a due task, drops the others and leaves the worker running. Not built under TSan (it replaces operator new).
+bench/bench_post.cc         What a producer pays to arm a task: add(), post(), post_ordered() (`SCHEDULER_BENCH`).
 examples/colored_trace/     Runnable demo that injects a real trace header to restore colored, formatted trace output.
 CMakeLists.txt              STATIC library `scheduler` (+ alias scheduler::scheduler); FetchContents stash + threadpool; CTest test `scheduler`.
 LICENSE                     MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                   What it is, install, quick start.
 docs/API.md                 The API reference and the tracing hooks.
-docs/scheduler.d2           The README diagram's source (docs/scheduler.svg is rendered from it).
 examples/demo.cc            A runnable tour (target scheduler_demo).
 ARCHITECTURE.md             Internal design, the timing model, trade-offs.
 ```
@@ -97,7 +102,64 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   proposes a wakeup, `peep`s for something sooner, CASes `atom_next_wakeup_time`,
   and sleeps on a condvar under `mtx`. `add()` lowers `atom_next_wakeup_time` and
   notifies. The mutex must be held across the load-then-wait so an `add()` can't
-  slip between them. Keep the lock discipline exactly as is.
+  slip between them. Keep the lock discipline exactly as is. `add()` reads the
+  published wakeup time and `sleeping` only after its seq_cst fence
+  (`scheduler_handshake_model` reads the order from this header and fails
+  otherwise). A pass that finds a task due already walks at once, without the mutex
+  and without setting `sleeping`; `busy_pass` (`test/post.cc`) fails if it sleeps
+  instead, which made one producer's `add()` cost a third more. A busy pass files the
+  stack once, and no pass writes `ending` before `finish()` begins: producers touch
+  `posted` and read `ending` on every call, so each extra worker write there costs
+  four producers' `post()` (CHANGELOG.md).
+
+- **`post()` hands a task over; `ingest()` files it.** Posters push onto `posted`, a lock-free
+  stack, with one compare-exchange (the task carries the link, `hand.posted.next`, and an owning
+  `hand.posted.hold`, so nothing is allocated); the worker takes the whole stack with one exchange, turns it around and
+  files the tasks oldest first: a `post_ordered()` task into the `arrivals` queue, any other into
+  the wheel. The worker files at the top of each pass, under the mutex after it stores `sleeping`
+  (the Dekker pair: poster pushes then loads `sleeping`, worker stores `sleeping` then loads
+  `posted`, all seq_cst), and after it wakes, before it fires. A task is posted once and never also
+  added; `hand` and `post_ordered` belong to the hand-off.
+- **A task is 56 bytes, and every task a caller makes pays for them.** libc++ puts 24 bytes of control
+  block in front of what `make_shared` builds, so 56 bytes is an 80-byte allocation: the size class
+  every task had before `post()` existed (48 bytes), and one more field is the next class up and
+  `make only` slows by 4% with four producers on the M4 Pro (`scheduler_bench_post`; CHANGELOG.md). The posted stage of `hand`
+  (the link and the hold) and its filed stage (`seq`, `tick`: the filing number and tick that merge
+  the arrival queue with the wheel) are one 24-byte union, because they never overlap: the worker ends the
+  posted stage (`end_posted()`, which returns the hold and leaves the filed stage zero) before it
+  writes the filed one, and a task never posted reads zero there, which `before()` takes for "never
+  filed". Keep `post_ordered` in the padding after `atom_cancelled`. `scheduler_task_size` checks the
+  size and the stages.
+- **A task does not derive `std::enable_shared_from_this`.** The base is 16 bytes in every task and
+  `make_shared` increments the control block's weak count to fill it, an atomic read-modify-write that
+  `make only` pays on every task (12 to 14% of the row on the M4 Pro). Nothing in the library or in
+  logger calls `shared_from_this()` on a task; a task that needs its owner is handed the pointer.
+- **`finish()` closes the stack on every exit of the worker loop.** When the worker finds nothing
+  due and `finish()` has begun it exchanges a closed mark into `posted` and files what it held;
+  when the countdown reaches zero (or `finish(0)`) it does the same after the loop and runs what
+  is due. A `post()` that pushes after that sees the mark and returns `stopping`; one that
+  pushed before is filed. Without the close a poster that passed its `stopping` check just
+  before `finish()` could push after the worker's last look, and the task, which holds itself
+  through `hand.posted.hold`, would never run and never be freed. Only the worker ever writes the mark.
+  `finish_exit_none`, `finish_exit_countdown` and `finish_exit_zero` (`test/post.cc`) are the check for each exit (`test_finish_race` alone passes without the
+  close).
+- **No task code runs under `mtx`.** Filing a posted task can destroy a cleared one or run a
+  refused one, and a task that posts takes `mtx` to signal. The worker therefore only tests
+  `has_posted()` under the lock (the Dekker half) and files after it unlocks.
+- **The arrival queue is merged, never fired alone.** `fire_due()` takes the wheel's next due task
+  and the queue's head and runs the one that comes first by (tick, filing order), the order the
+  wheel alone would give. The tick is the one the task is *filed* in: `ingest()` records it with
+  `SchedulerQueue::filing_tick()`, which applies the floor stash files an overdue key at. Comparing
+  due times instead breaks the order whenever the worker was busy while tasks were posted
+  (`mixed_order(true)` in `test/post.cc` fails without it). `limit` is read before the wheel is walked, so a walk that finds nothing
+  means no wheel task is due before `limit`, and only then may queue tasks run without looking at
+  the wheel. A `post_ordered()` poster must post nondecreasing wakeup times (a wakeup of its clock reading
+  plus a fixed delay is fine). Across posters the times may fall out of order by the gap between
+  a clock reading and the push: a task behind a later head waits for it and wheel tasks due in
+  between pass it, but posts ordered by anything that orders them keep due order
+  (`test_ordered_posters`).
+  Tasks added with `add()` have no filing order, so they and `post_ordered()` tasks are not
+  ordered against each other within a tick.
 
 ## How to extend
 
@@ -110,7 +172,12 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   `log.h`'s and the colors to `colors.h`. See `examples/colored_trace/`.
 - **Always extend the smoke test.** `test/test.cc` is the only executable check.
   Any behavioral change should grow a corresponding assertion there. Keep timing
-  windows generous; never assert a tight race.
+  windows generous; never assert a tight race by luck: pin a race with
+  `SCHEDULER_TEST_HOOK` (as `test_add_between_peep_and_sleep` does) and soak it with
+  `scheduler_soak`. ctest runs the soak with one producer and with three
+  (`scheduler_soak_producers`). A TSan from LLVM 12 or older reports races inside
+  stash's insert with two or more producers that are not there: it ignores a failed
+  compare-exchange's acquire (stash's AGENTS.md, Traps); use a newer one.
 
 ## Traps
 
@@ -138,24 +205,21 @@ and exposes the source dir as a `PUBLIC` include. The test target is
 ## Standalone vs. Xapiand
 
 This is a standalone extraction from
-[Xapiand](https://github.com/Kronuz/Xapiand). The delta from the original is pure
-decoupling:
+[Xapiand](https://github.com/Kronuz/Xapiand). It differs from the original in
+these places:
 
-- `scheduler.h` and `debouncer.h` dropped `#include "log.h"`. The four trace
-  macros (`L_SCHEDULER`, `L_DEBUG_HOOK`, `L_EXC`, `L_CALL`) now resolve through
-  `scheduler_trace.h` (no-op by default). The `stash.h`, `thread.hh`,
-  `work_pool.hh` includes now resolve to the FetchContent'd
-  standalone libraries.
+- `scheduler.h` and `debouncer.h` do not include `log.h`. The four trace macros
+  (`L_SCHEDULER`, `L_DEBUG_HOOK`, `L_EXC`, `L_CALL`) resolve through
+  `scheduler_trace.h` (no-op by default). The `stash.h`, `thread.hh`, and
+  `work_pool.hh` includes resolve to the FetchContent'd standalone libraries.
 - The uniform-random helpers come from the
   [random](https://github.com/Kronuz/random) library, as in Xapiand.
-- `callable_traits.hh` was copied verbatim — it had zero Xapiand dependencies
-  already.
+- `callable_traits.hh` is a verbatim copy; it has no Xapiand dependencies.
+- The queue's `clean` is walk-based (stash's sentinel frontier).
+- A debouncer touch re-arms the pending call in place, and the latest arguments
+  win (no cancel and re-add, see `docs/perf/lazy-rearm.md`).
 
-Since the extraction the logic has diverged in two places: the queue's `clean` is
-walk-based (stash's sentinel frontier), and a debouncer touch re-arms the pending
-call in place (the latest arguments win, `e7954f2`; no cancel and re-add, see
-`docs/perf/lazy-rearm.md`). Xapiand now fetches this
-library at `main`, so it runs the same code. Keep extraction hygiene separate from behavior
-changes so they can be reconciled with upstream. To restore Xapiand's tracing and
-coloring without editing these files, see "Tracing and coloring" in
-[docs/API.md](docs/API.md).
+Xapiand fetches this library at `main`, so it runs the same code. Keep
+extraction hygiene separate from behavior changes so they can be reconciled with
+upstream. To restore Xapiand's tracing and coloring without editing these files,
+see "Tracing and coloring" in [docs/API.md](docs/API.md).

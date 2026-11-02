@@ -2,7 +2,8 @@
 
 ## `ScheduledTask<SchedulerImpl, ScheduledTaskImpl, ThreadPolicyType policy = regular>`
 
-CRTP base for a cancellable scheduled task.
+CRTP base for a cancellable scheduled task. It is 56 bytes and does not derive
+`std::enable_shared_from_this`: keep the `std::shared_ptr` you make it with.
 
 - `operator bool()` — true while not yet cleared.
 - `clear() -> bool` — cancel; the first call wins a CAS and returns true, later
@@ -15,7 +16,25 @@ CRTP base for a cancellable scheduled task.
 - `add(task)` / `add(task, wakeup_time) -> schedule_result`, `noexcept` —
   schedule (`wakeup_time` clamped to not be in the past; the one-arg form expects
   `task->wakeup_time` already set). Not `[[nodiscard]]`: a caller that ignores the
-  result keeps the old drop-silently behaviour.
+  result drops a refused task silently.
+- `post(task, wakeup_time, now) -> schedule_result`, `noexcept` — hand the task to
+  the scheduler thread, which files it into the wheel on its next pass. The caller
+  pays one compare-exchange (no wheel insert, no allocation, no clock read: `now`
+  is its own reading) and signals the thread only when it sleeps past the task.
+  A task cleared before the thread files it never enters the wheel. Tasks posted
+  by one thread, or ordered by anything that orders their posts, fire in that
+  order within a tick. Refusals are `stopping` and `past_horizon`; an allocation
+  failure while filing is the scheduler thread's to handle (it runs a due task,
+  drops the rest), not reported to the caller. Post a task once; do not `add` it too.
+- `post_ordered(task, wakeup_time, now) -> schedule_result`, `noexcept` — `post()` for a caller
+  whose own wakeup times never decrease (a fixed delay after each of its clock readings). The
+  scheduler thread keeps the task in an arrival queue instead of the wheel, which is cheaper for
+  it and avoids the wheel's cost when many tasks fall in one tick, and fires it merged with the
+  wheel by the tick each was filed in and the filing order. Several callers may post ordered
+  tasks; the times can then fall out of order by the gap between a caller's clock reading and
+  its push, and a task behind a later head waits for it, while wheel tasks due between the two
+  pass it (posts that are ordered by anything that orders them, with the same fixed delay, still
+  fire in due order).
 - `enum class schedule_result : std::uint8_t` — `scheduled` (on the wheel), or
   why a task will never fire: `past_horizon` (more than 24 h out), `stopping`
   (`finish()` began), `no_memory` (the wheel could not allocate).
@@ -36,6 +55,10 @@ Same as `Scheduler` plus a worker pool.
 - `size()` (dispatched, not started), `running_size()` (executing),
   `threadpool_size()` and `threadpool_capacity()` (the worker count) — pool state queries.
 - runs each due task by **dispatching** it to the pool.
+- `refused_size()` counts due tasks the pool could not allocate a dispatch for: the wheel had
+  claimed them, so they never run.
+- Do not destroy a `ThreadedScheduler` or a `Debouncer` from one of its own tasks: the destructor
+  waits for the running tasks and aborts when called from one.
 - `finish(wait)` stops the wheel and drops the dispatched tasks that have not started;
   running ones finish. With `wait != 0` it also joins. `join(timeout)` waits for the wheel
   thread and the running tasks and returns `false` on timeout.

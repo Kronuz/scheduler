@@ -8,16 +8,16 @@ include(FetchContent)
 #   stash       — the lock-free hierarchical slot store (the timer-wheel primitive)
 #   threadpool  — Thread<Impl,policy> + ThreadPolicyType + WorkPool/WorkGroup
 # Both are public (consumers see stash.h / thread.hh / work_pool.hh on their
-# include path), tracking their default-branch tips.
+# include path), pinned by commit.
 FetchContent_Declare(
   stash
   GIT_REPOSITORY https://github.com/Kronuz/stash.git
-  GIT_TAG        351ef2e0fb69c3648eb1e33439ced4a50443200b
+  GIT_TAG        8fa5d2aa7db977137a72283d80bc7fe6bfa8b6ed
 )
 FetchContent_Declare(
   threadpool
   GIT_REPOSITORY https://github.com/Kronuz/threadpool.git
-  GIT_TAG        44551e51a1baf3daacab1161fc846185e5faee34
+  GIT_TAG        bb19710cb3a9a589bb69b5378a6bd334211d02f8
 )
 FetchContent_MakeAvailable(stash threadpool)
 # random_time (the debouncer's force window) comes from the random library; reuse
@@ -26,7 +26,7 @@ if(NOT TARGET random::random)
   FetchContent_Declare(
     random
     GIT_REPOSITORY https://github.com/Kronuz/random.git
-    GIT_TAG        6487253c9e7a4855ccbea36f7a66cea5fef7d381
+    GIT_TAG        e040c2b383a1a19147cfcb0d14947d38d098e534
   )
   FetchContent_MakeAvailable(random)
 endif()
@@ -50,6 +50,31 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(scheduler_test PRIVATE scheduler)
   add_test(NAME scheduler COMMAND scheduler_test)
 
+  # Lost-task soak: a short smoke run under ctest; run it with a large add count (and
+  # under TSan) to soak, e.g. `scheduler_soak 100000000 1 2 1`.
+  add_executable(scheduler_soak test/soak.cc)
+  target_link_libraries(scheduler_soak PRIVATE scheduler)
+  add_test(NAME scheduler_soak COMMAND scheduler_soak 300000 1 2 0)
+  add_test(NAME scheduler_soak_burst COMMAND scheduler_soak 60000 1 2 1)
+  # Three producers on one wheel: stash's concurrent insert under the sanitizers.
+  add_test(NAME scheduler_soak_producers COMMAND scheduler_soak 150000 3 2 0)
+
+  # post(): the lock-free hand-off from producer threads to the worker (order, cancel,
+  # wake, many producers, a finish() that races the posters).
+  add_executable(scheduler_post_test test/post.cc)
+  target_link_libraries(scheduler_post_test PRIVATE scheduler)
+  add_test(NAME scheduler_post COMMAND scheduler_post_test)
+
+  # The size of ScheduledTask (what every task a caller makes pays for) and the stages of its hand-off fields.
+  add_executable(scheduler_task_size_test test/task_size.cc)
+  target_link_libraries(scheduler_task_size_test PRIVATE scheduler)
+  add_test(NAME scheduler_task_size COMMAND scheduler_task_size_test)
+
+  # add()'s side of the sleep handshake, read from scheduler.h, against a store-buffer model of
+  # the worker's pass in every interleaving (no hardware run can show a fence placed too late).
+  add_executable(scheduler_handshake_model test/handshake_model.cc)
+  add_test(NAME scheduler_handshake_model COMMAND scheduler_handshake_model "${CMAKE_CURRENT_SOURCE_DIR}/scheduler.h")
+
   # Allocation failure (no_memory). It replaces global operator new and delete,
   # which TSan's static runtime also defines (a link clash), so TSan builds skip
   # it; CI passes TSan through the per-config and linker flags.
@@ -71,6 +96,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   if(SCHEDULER_BENCH)
     add_executable(scheduler_bench_churn bench/bench_churn.cc)
     target_link_libraries(scheduler_bench_churn PRIVATE scheduler)
+    # What a producer pays to arm a task: add(), post() and post_ordered(); --compare adds a
+    # priority_queue + mutex + condition_variable timer queue, after a same-results check that
+    # --check runs alone (the CTest test below).
+    add_executable(scheduler_bench_post bench/bench_post.cc)
+    target_link_libraries(scheduler_bench_post PRIVATE scheduler)
+    add_test(NAME scheduler_bench_post_check COMMAND scheduler_bench_post --check)
 
     add_executable(scheduler_bench_pool bench/bench_pool.cc)
     target_link_libraries(scheduler_bench_pool PRIVATE scheduler)

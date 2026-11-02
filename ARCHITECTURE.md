@@ -72,7 +72,7 @@ boundary, so a task that is overdue but not yet run is never reclaimed.
 
 ### `ScheduledTask` — the cancellable unit
 
-A CRTP, `enable_shared_from_this` task carrying a `wakeup_time` and two atomic
+A CRTP task carrying a `wakeup_time` and two atomic
 timestamps (`atom_created_at`, `atom_cleared_at`). `operator bool()` reports "not
 yet cleared." `clear()` cancels with a single `compare_exchange_strong` on
 `atom_cleared_at`: the first caller wins and returns true, every later caller
@@ -92,9 +92,11 @@ Its loop:
 2. `peep` the queue for anything due sooner; if found, lower the proposed wakeup
    to that task's `wakeup_time` and flag `pending`.
 3. CAS the proposed time into `atom_next_wakeup_time`.
-4. Under `mtx`, reload `atom_next_wakeup_time` and `wait_until` on the condvar —
-   so the thread sleeps until the earliest task is due, or until an `add()`
-   notifies it sooner.
+4. If a task is due already, skip to step 5: there is nothing to wait for, so the
+   worker neither takes `mtx` nor announces `sleeping`, and producers arming tasks
+   while it runs them see no sleeping worker to signal. Otherwise, under `mtx`,
+   reload `atom_next_wakeup_time` and `wait_until` on the condvar, so the thread
+   sleeps until the earliest task is due, or until an `add()` notifies it sooner.
 5. On wake, `clean_checkpoint()`, then `walk()` every due task and hand each to
    the run strategy (`static_cast<SchedulerImpl*>(this)->operator()(task)`), then
    `clean()`.
@@ -105,7 +107,90 @@ loop immediately. The mutex is held across the load-then-wait in the loop so an
 `add()` can't slip in between and be lost. One mutex, one condvar, a lock-free
 queue underneath.
 
+**No lost task (the handshake).** `add()` signals only while the worker is
+`sleeping`, and lowers the published wakeup only when it is later than the task's
+time. That alone leaves a window: the published time can be *stale* (already past, or
+earlier than the new task), so `add()` has nothing to lower, and a worker between its
+`peep` and its sleep is not yet `sleeping`, so `add()` sends no signal. The worker would
+then publish a fresh 30 s target and sleep through a task due now. A Dekker pair closes
+the window: `add()` places the task, fences (seq_cst), and only then reads the published
+wakeup time (lowering it to the task's) and `sleeping`; the worker stores `sleeping`,
+fences and, under the mutex, `peep`s once more before it waits, lowering its target to what
+it finds. Of the two fences, whichever comes first in the seq_cst order makes the other side
+see what preceded it: if the worker's does, `add()` sees `sleeping` and the target the worker
+raised, lowers it and signals under the mutex the worker holds until it waits; if `add()`'s
+does, the worker's second `peep` sees the task. (`add()` must not read the published time
+before its fence: the wheel insert is release-only, so a stale read there, a target between
+now and the task, would let it skip the signal while the worker, having missed the insert,
+sleeps to the target it raised.) The stale-publish window is reproduced deterministically by
+`test_add_between_peep_and_sleep` (the `SCHEDULER_TEST_HOOK` seam parks the worker there) and
+soaked by `scheduler_soak`; the order of `add()`'s operations is checked by
+`scheduler_handshake_model`, which reads them from `scheduler.h` and runs them against the
+worker's pass in every interleaving of a store-buffer model, because no run on real hardware
+shows a fence placed too late.
+
 `end(wait)` sets a countdown that lets the loop drain pending work, then exit.
+
+### `post()`: the hand-off for a hot producer
+
+`add()` does the wheel insert on the caller's thread: an announce, a descent through the
+four levels, a heap box for the value, and shared counters that the worker's walk also
+touches. For a producer that arms a task on every call (the logger) that is most of the
+call. `post()` moves the insert to the worker: the caller pushes the task onto a lock-free
+stack (`posted`, one compare-exchange; the task carries its own link and an owning
+reference, so nothing is allocated) and the worker takes the whole stack with one exchange,
+turns it around, and files the tasks into the wheel oldest first. The wheel then has a
+single inserter, and the order within a tick is the order of the pushes, which is the order
+of anything that orders the posts. A task cleared before it is filed is dropped without a
+wheel entry.
+
+The worker files the stack at the top of each pass (so its `peep` sees the tasks) and
+again after it wakes, before the walk. Before it sleeps it stores `sleeping` and reads
+`posted` under the mutex (the same Dekker pair as `add()`: the poster pushes, then loads
+`sleeping`; the worker stores `sleeping`, then reads `posted`, all seq_cst, so one side
+sees the other); a task found there makes it skip the wait and go round, filing it after
+it unlocks, because filing can run task code (the destructor of a task cleared before it
+was filed, a task the wheel refused) and a task that posts takes the mutex. A poster also
+lowers the published wakeup time to its task's when that is earlier, which carries the wake
+for most tasks, but not when there is nothing to lower (the worker woke by timeout, so the
+published time is already past, and the task is posted before the worker raises it): then
+only the pair saves the task from sleeping to the worker's idle target (`peep_sleep_stale`
+is the check). A poster signals only when the worker sleeps past the task (or
+its target has passed), and the first poster in a sleep sets `wake_requested` so a burst of
+posts sends one signal; the worker clears it each time it goes to sleep.
+
+**The arrival queue.** A caller that arms a task on every call for a fixed delay (the
+logger's lines, due 1 ms after each call) posts them with `post_ordered()`: each poster's wakeup
+times never decrease, so the worker keeps them in a plain queue in filing order and never inserts
+them into the wheel. Across posters the times can fall out of order by the gap between a poster's
+clock reading and its push; the queue then holds a task behind a later head, and wheel tasks due
+between the two pass it. Posts ordered by anything that orders them, with wakeups of the
+poster's clock plus one fixed delay, still fire in due order, because everything ahead of such a
+task was pushed before it and is due no later than the delay after its push (`test_ordered_posters`
+checks it with posters that read the clock, wait, and push). The queue costs the worker a deque push
+where the wheel costs an insert: a descent through four levels, a heap box for the value, and an
+announce. The queue and the wheel fire merged:
+`fire_due()` runs whichever of the wheel's next due task and the queue's head comes first by (tick,
+filing order), which is the order the wheel alone would give. The tick is the one the task is filed
+in, and a task already overdue when the worker files it lands at the floor of the wheel's last walk
+(stash files any key below that floor there), so the worker records that tick (`hand.filed.tick`) as it
+files a task, for the queue's tasks as well as the wheel's. (Ordering by the due time instead lets a
+queue task overtake a wheel task posted before it whenever the worker has been busy, because the wheel
+has by then moved the earlier task up to the floor: `mixed_order(true)` is the check.) It reads `limit` (the time) before it
+walks the wheel, so a walk that finds nothing means nothing on the wheel is due before `limit` and
+the queue's due tasks can run without another walk (it walks again every 256). The worker's wakeup
+target is the queue's head when that is sooner than the wheel's next task.
+
+`finish()` closes the stack, whichever way the worker's loop ends. When it finds nothing due
+and `finish()` has begun it swaps a closed mark into `posted`, files what it held, and goes
+round again if there was any; when the countdown reaches zero it does the same after the loop,
+then runs what is due. A `post()` that passed its `stopping` check before `finish()` and
+pushes after the close sees the mark and is refused (`stopping`); one that pushed before it
+is filed, and runs if due or is released with the wheel. A task is never left on the stack,
+where it owns itself and nothing frees it. `finish_exit_none`, `finish_exit_countdown` and `finish_exit_zero` hold a poster between its
+check and its push (`SCHEDULER_PUSH_HOOK`) and ends the worker by each exit; `test_finish_race`
+(200 rounds, three posters) checks that every accepted task runs and none is run twice, but
+its race window is a few nanoseconds wide and it does not by itself tell the exits apart.
 
 ### Two run strategies
 
@@ -185,9 +270,9 @@ Releasing or throttling:
   the throttler's wakeup time — a post-fire floor on the key's firing rate.
 
 A touch never cancels a pending call, so the wheel holds at most one entry per key
-plus one per re-arm, instead of one per touch: cancelled tasks used to stay in the
-wheel with their arguments until their slot drained (`bench/bench_churn.cc`;
-`docs/perf/lazy-rearm.md`). Only a throttler is still cancelled, when a touch turns
+plus one per re-arm. A cancelled task stays in the wheel with its arguments until its
+slot drains, so cancelling and re-adding on every touch would keep one dead task per
+touch (`bench/bench_churn.cc`; `docs/perf/lazy-rearm.md`). Only a throttler is cancelled, when a touch turns
 a throttled key back into a pending call; the throttler releases a key only while
 it is still that key's task.
 
@@ -203,10 +288,9 @@ dependencies of its own.
 ## The random helpers
 
 The force window draws from `random_time(min, max)`, a uniform draw over a
-`mt19937_64` seeded from `std::random_device`, kept `thread_local`. `random.cc`
-carries it plus `random_int` and `random_real` (the three helpers the debouncer
-pulls in). Xapiand's `random_string` was left behind because it dragged in
-unrelated Xapiand code.
+`mt19937_64` seeded from `std::random_device`, kept `thread_local`. It comes from
+the [random](https://github.com/Kronuz/random) library (`random.hh`), fetched by
+CMake.
 
 ## Tracing seam
 
@@ -222,9 +306,8 @@ arguments. Because the default macros expand to nothing, the preprocessor
 discards the arguments and the color identifiers are never compiled — so the
 standalone build needs no color stubs at all. Only a trace header that turns the
 macros into real string-building calls (like `examples/colored_trace/trace.h`)
-has to define those nine identifiers. This was verified empirically: the library
-and its test compile clean with `scheduler_trace.h` defining nothing for the
-colors.
+has to define those nine identifiers. The library and its test compile clean with
+`scheduler_trace.h` defining nothing for the colors.
 
 A consumer restores real, colored tracing by pointing `SCHEDULER_TRACE_HEADER` at
 a header that defines the four macros and the nine colors — Xapiand maps them

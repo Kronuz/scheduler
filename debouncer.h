@@ -1,4 +1,5 @@
 /*
+ * Copyright © 2026 Germán Méndez Bravo (Kronuz)
  * Copyright (c) 2015-2019 Dubalu LLC
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -98,7 +99,7 @@ public:
 		// throttle / statuses during shutdown would read freed memory (UAF).
 		//
 		// finish() is idempotent (the base destructor calls it again harmlessly:
-		// end() just re-sets a flag, thread_pool.finish() is exchange-guarded, and
+		// end() just re-sets a flag, the group's cancel() is idempotent, and
 		// join() on already-exited threads returns immediately), so this is safe to
 		// call here even though the base also calls it.
 		try {
