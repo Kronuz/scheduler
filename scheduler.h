@@ -30,6 +30,7 @@
 #include <deque>                  // for std::deque
 #include <memory>
 #include <mutex>                  // for std::condition_variable, std::mutex
+#include <new>                    // for placement new
 #include <string>                 // for std::string
 #include <utility>                // for std::move
 
@@ -113,16 +114,41 @@ protected:
 	// BEFORE it runs, does not fire — honoring "if it hasn't run yet, it never
 	// will." See ScheduledTask::operator()/cancelled() and ThreadedScheduler.
 	std::atomic_bool atom_cancelled;
-
-	// The hand-off of BaseScheduler::post(): while the task waits for the worker to
-	// file it into the wheel, the link to the task posted before it and the owning
-	// reference the hand-off holds. Written by the poster before it publishes the task
-	// and by the worker after it takes the task; no other code touches them.
-	ScheduledTask* post_next = nullptr;
-	std::shared_ptr<ScheduledTask> post_hold;
 	bool post_ordered = false;           // post_ordered(): kept in the arrival queue, not the wheel
-	std::uint64_t ingest_seq = 0;        // the worker's count of tasks filed, to merge the queue with the wheel
-	unsigned long long ingest_tick = 0;  // the tick the task was filed in (its due tick, or the wheel's floor if overdue)
+
+	// The two stages of a post()ed task never overlap, so they share these 24 bytes.
+	// While the task waits on the stack: the link to the task posted before it and the
+	// reference the hand-off holds on it, written by the poster before it publishes the
+	// task and by the worker after it takes it. Once the worker has filed it: its filing
+	// number, to merge the arrival queue with the wheel, and the tick it was filed in (its
+	// due tick, or the wheel's floor if overdue). Both read zero in a task that was never
+	// posted. No other code touches them.
+	union Hand {
+		struct Posted {
+			ScheduledTask* next;
+			std::shared_ptr<ScheduledTask> hold;
+		} posted;
+		struct Filed {
+			std::uint64_t seq;
+			unsigned long long tick;
+		} filed;
+
+		Hand() noexcept : filed{0, 0} {}
+		~Hand() {}   // a posted task holds itself, so it is never destroyed while `hold` is set
+	} hand;
+
+	// Begins the posted stage, holding `task` (itself) until the worker takes it.
+	void begin_posted(std::shared_ptr<ScheduledTask> task) noexcept {
+		::new (static_cast<void*>(&hand.posted)) typename Hand::Posted{nullptr, std::move(task)};
+	}
+
+	// Ends the posted stage: returns the hold and leaves the filed stage, zeroed.
+	std::shared_ptr<ScheduledTask> end_posted() noexcept {
+		std::shared_ptr<ScheduledTask> task = std::move(hand.posted.hold);
+		hand.posted.~Posted();
+		::new (static_cast<void*>(&hand.filed)) typename Hand::Filed{0, 0};
+		return task;
+	}
 
 public:
 	ScheduledTask(std::chrono::steady_clock::time_point created_at = std::chrono::steady_clock::now()) :
@@ -340,24 +366,23 @@ class BaseScheduler : public Thread<BaseScheduler<SchedulerImpl, ScheduledTaskIm
 		// The stack is newest first: reverse it.
 		Task* oldest = nullptr;
 		while (head != nullptr) {
-			auto next = head->post_next;
-			head->post_next = oldest;
+			auto next = head->hand.posted.next;
+			head->hand.posted.next = oldest;
 			oldest = head;
 			head = next;
 		}
 		bool filed = false;
 		while (oldest != nullptr) {
-			auto next = oldest->post_next;
-			TaskType task = std::move(oldest->post_hold);   // `oldest` may be freed once this goes out of scope
-			oldest->post_next = nullptr;
+			auto next = oldest->hand.posted.next;
+			TaskType task = oldest->end_posted();   // `oldest` may be freed once this goes out of scope
 			oldest = next;
 			if (!*task) {
 				continue;   // cancelled before it was filed
 			}
-			task->ingest_seq = ++filed_count;
+			task->hand.filed.seq = ++filed_count;
 			// The tick the wheel files it in (an overdue task lands at the floor of the last walk,
 			// and the queue must order it as the wheel would).
-			task->ingest_tick = scheduler_queue.filing_tick(task->wakeup_time);
+			task->hand.filed.tick = scheduler_queue.filing_tick(task->wakeup_time);
 			auto wakeup_time = task->wakeup_time;
 			if (task->post_ordered) {
 				try {
@@ -389,9 +414,9 @@ class BaseScheduler : public Thread<BaseScheduler<SchedulerImpl, ScheduledTaskIm
 	// filed. A task put on the wheel with add() has no filing tick recorded; its due tick stands.
 	static bool before(const Task& a, const Task& b) noexcept {
 		using Queue = SchedulerQueue<SchedulerImpl, ScheduledTaskImpl, thread_policy>;
-		auto ta = a.ingest_tick ? a.ingest_tick : Queue::tick_start(a.wakeup_time);
-		auto tb = b.ingest_tick ? b.ingest_tick : Queue::tick_start(b.wakeup_time);
-		return ta != tb ? ta < tb : a.ingest_seq < b.ingest_seq;
+		auto ta = a.hand.filed.tick ? a.hand.filed.tick : Queue::tick_start(a.wakeup_time);
+		auto tb = b.hand.filed.tick ? b.hand.filed.tick : Queue::tick_start(b.wakeup_time);
+		return ta != tb ? ta < tb : a.hand.filed.seq < b.hand.filed.seq;
 	}
 
 	// Runs what is due: the wheel's due tasks and the due head of the arrival queue, merged in
@@ -415,7 +440,7 @@ class BaseScheduler : public Thread<BaseScheduler<SchedulerImpl, ScheduledTaskIm
 					static_cast<SchedulerImpl*>(this)->operator()(task);
 					held = scheduler_queue.walk();
 				}
-			} else if (!arrivals.empty() && arrivals.front()->ingest_tick < limit) {
+			} else if (!arrivals.empty() && arrivals.front()->hand.filed.tick < limit) {
 				TaskType task = std::move(arrivals.front());
 				arrivals.pop_front();
 				static_cast<SchedulerImpl*>(this)->operator()(task);
@@ -685,14 +710,14 @@ private:
 		}
 		Task* const node = task.get();
 		node->wakeup_time = wakeup_time;
-		node->post_hold = task;
+		node->begin_posted(task);
 		auto head = posted.load(std::memory_order_relaxed);
 		do {
 			if (head == closed_mark()) {
-				node->post_hold.reset();
+				node->end_posted();
 				return schedule_result::stopping;
 			}
-			node->post_next = head;
+			node->hand.posted.next = head;
 		} while (!posted.compare_exchange_weak(head, node, std::memory_order_seq_cst, std::memory_order_relaxed));
 
 		// Bring the worker's wakeup forward if this task is due before it, and signal it

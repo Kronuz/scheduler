@@ -173,7 +173,7 @@ announce. The queue and the wheel fire merged:
 `fire_due()` runs whichever of the wheel's next due task and the queue's head comes first by (tick,
 filing order), which is the order the wheel alone would give. The tick is the one the task is filed
 in, and a task already overdue when the worker files it lands at the floor of the wheel's last walk
-(stash files any key below that floor there), so the worker records that tick (`ingest_tick`) as it
+(stash files any key below that floor there), so the worker records that tick (`hand.filed.tick`) as it
 files a task, for the queue's tasks as well as the wheel's. (Ordering by the due time instead lets a
 queue task overtake a wheel task posted before it whenever the worker has been busy, because the wheel
 has by then moved the earlier task up to the floor: `mixed_order(true)` is the check.) It reads `limit` (the time) before it

@@ -65,6 +65,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(scheduler_post_test PRIVATE scheduler)
   add_test(NAME scheduler_post COMMAND scheduler_post_test)
 
+  # The size of ScheduledTask (what every task a caller makes pays for) and the stages of its hand-off fields.
+  add_executable(scheduler_task_size_test test/task_size.cc)
+  target_link_libraries(scheduler_task_size_test PRIVATE scheduler)
+  add_test(NAME scheduler_task_size COMMAND scheduler_task_size_test)
+
   # add()'s side of the sleep handshake, read from scheduler.h, against a store-buffer model of
   # the worker's pass in every interleaving (no hardware run can show a fence placed too late).
   add_executable(scheduler_handshake_model test/handshake_model.cc)

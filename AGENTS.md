@@ -16,6 +16,7 @@ test/test.cc                Tests: inline Scheduler order, clear() cancel, Threa
 test/soak.cc                Lost-task soak (`scheduler_soak`): any task that never fires fails it.
 test/post.cc                post() and post_ordered(): order (one thread, across threads, mixed delays against the wheel's oracle), cancel, wake, horizon, many producers, finish() racing the posters.
 test/handshake_model.cc     add()'s side of the sleep handshake, read from scheduler.h, against a store-buffer model of the worker's pass.
+test/task_size.cc           ScheduledTask is 72 bytes, and the posted and filed stages of its hand-off fields share storage (`scheduler_task_size`).
 test/no_memory.cc           Allocation failure (`scheduler_no_memory`): add() and debounce() report it; a refused block in the worker's arrival queue runs a due task, drops the others and leaves the worker running. Not built under TSan (it replaces operator new).
 bench/bench_post.cc         What a producer pays to arm a task: add(), post(), post_ordered() (`SCHEDULER_BENCH`).
 examples/colored_trace/     Runnable demo that injects a real trace header to restore colored, formatted trace output.
@@ -112,20 +113,29 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   four producers' `post()` (CHANGELOG.md).
 
 - **`post()` hands a task over; `ingest()` files it.** Posters push onto `posted`, a lock-free
-  stack, with one compare-exchange (the task carries `post_next` and an owning `post_hold`, so
-  nothing is allocated); the worker takes the whole stack with one exchange, turns it around and
+  stack, with one compare-exchange (the task carries the link, `hand.posted.next`, and an owning
+  `hand.posted.hold`, so nothing is allocated); the worker takes the whole stack with one exchange, turns it around and
   files the tasks oldest first: a `post_ordered()` task into the `arrivals` queue, any other into
   the wheel. The worker files at the top of each pass, under the mutex after it stores `sleeping`
   (the Dekker pair: poster pushes then loads `sleeping`, worker stores `sleeping` then loads
   `posted`, all seq_cst), and after it wakes, before it fires. A task is posted once and never also
-  added; `post_next`, `post_hold`, `post_ordered`, `ingest_seq` and `ingest_tick` belong to the hand-off.
+  added; `hand` and `post_ordered` belong to the hand-off.
+- **A task is 72 bytes, and every task a caller makes pays for them.** The posted stage of `hand`
+  (the link and the hold) and its filed stage (`seq`, `tick`: the filing number and tick that merge
+  the arrival queue with the wheel) are one 24-byte union, because they never overlap: the worker ends the
+  posted stage (`end_posted()`, which returns the hold and leaves the filed stage zero) before it
+  writes the filed one, and a task never posted reads zero there, which `before()` takes for "never
+  filed". Do not add a field beside them without measuring `make only` in `scheduler_bench_post`: kept
+  as separate fields they make a task 96 bytes, and `make only` slows (CHANGELOG.md has the cost).
+  Keep `post_ordered` in the padding after `atom_cancelled`. `scheduler_task_size` checks the size
+  and the stages.
 - **`finish()` closes the stack on every exit of the worker loop.** When the worker finds nothing
   due and `finish()` has begun it exchanges a closed mark into `posted` and files what it held;
   when the countdown reaches zero (or `finish(0)`) it does the same after the loop and runs what
   is due. A `post()` that pushes after that sees the mark and returns `stopping`; one that
   pushed before is filed. Without the close a poster that passed its `stopping` check just
   before `finish()` could push after the worker's last look, and the task, which holds itself
-  through `post_hold`, would never run and never be freed. Only the worker ever writes the mark.
+  through `hand.posted.hold`, would never run and never be freed. Only the worker ever writes the mark.
   `finish_exit_none`, `finish_exit_countdown` and `finish_exit_zero` (`test/post.cc`) are the check for each exit (`test_finish_race` alone passes without the
   close).
 - **No task code runs under `mtx`.** Filing a posted task can destroy a cleared one or run a
