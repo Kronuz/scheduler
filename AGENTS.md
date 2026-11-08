@@ -95,9 +95,7 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   turn it into a plain store.
 - **The scheduler loop's wakeup math is subtle.** `BaseScheduler::operator()`
   proposes a wakeup, `peep`s for something sooner, CASes `atom_next_wakeup_time`,
-  and sleeps on a condvar under `mtx`. `add()` lowers `atom_next_wakeup_time` and
-  notifies. The mutex must be held across the load-then-wait so an `add()` can't
-  slip between them. Keep the lock discipline exactly as is.
+  and sleeps on a condvar under `mtx`. Successful queue publication and shutdown increment `wakeup_generation`; the consumer captures it before peep and checks it under `mtx` before waiting. Keep generation operations sequentially consistent unless a separate proof justifies weaker ordering. Trace callouts and queue inspection stay outside the notifier critical section.
 
 ## How to extend
 

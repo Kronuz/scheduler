@@ -25,7 +25,7 @@
 #include <atomic>                 // for std::atomic
 #include <cassert>                // for assert
 #include <chrono>                 // for std::chrono
-#include <cstdint>                // for std::uint8_t
+#include <cstdint>                // for std::uint8_t, std::uint64_t
 #include <memory>
 #include <mutex>                  // for std::condition_variable, std::mutex
 #include <string>                 // for std::string
@@ -235,6 +235,7 @@ class BaseScheduler : public Thread<BaseScheduler<SchedulerImpl, ScheduledTaskIm
 
 	std::condition_variable wakeup_signal;
 	std::atomic<std::chrono::steady_clock::time_point> atom_next_wakeup_time;
+	std::atomic<std::uint64_t> wakeup_generation{0};
 
 	SchedulerQueue<SchedulerImpl, ScheduledTaskImpl, thread_policy> scheduler_queue;
 
@@ -244,6 +245,7 @@ class BaseScheduler : public Thread<BaseScheduler<SchedulerImpl, ScheduledTaskIm
 protected:
 	void end(int wait = 10) {
 		ending = wait;
+		wakeup_generation.fetch_add(1);
 
 		std::lock_guard<std::mutex> lk(mtx);
 		wakeup_signal.notify_all();
@@ -279,6 +281,7 @@ public:
 		lk.unlock();
 
 		while (ending != 0) {
+			const auto generation = wakeup_generation.load();
 			if (--ending < 0) {
 				ending = -1;
 			}
@@ -305,6 +308,8 @@ public:
 				}
 			}
 
+			L_DEBUG_HOOK("BaseScheduler::BEFORE_PROPOSE", "scheduler wakeup proposal");
+
 			// Try setting the worked out wakeup time as the real next wakeup time:
 			if (atom_next_wakeup_time.compare_exchange_strong(next_wakeup_time, wakeup_time)) {
 				if (ending >= 0 && !pending) {
@@ -319,7 +324,7 @@ public:
 			L_DEBUG_HOOK("BaseScheduler::LOOP", "BaseScheduler::" + STEEL_BLUE + "LOOP" + CLEAR_COLOR + " - now:{}, next_wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(atom_next_wakeup_time.load().time_since_epoch()).count());
 			lk.lock();
 			next_wakeup_time = atom_next_wakeup_time.load();
-			if (next_wakeup_time > now) {
+			if (wakeup_generation.load() == generation && next_wakeup_time > now) {
 				wakeup_signal.wait_until(lk, next_wakeup_time);
 			}
 			lk.unlock();
@@ -347,6 +352,7 @@ public:
 				return result;
 			}
 
+			wakeup_generation.fetch_add(1);
 			auto next_wakeup_time = atom_next_wakeup_time.load();
 			while (next_wakeup_time > wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(next_wakeup_time, wakeup_time)) { }
 

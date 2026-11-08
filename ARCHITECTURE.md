@@ -88,24 +88,17 @@ task before scheduling a new one.
 concrete scheduler `Impl` (CRTP) so it can call back into the right run strategy.
 Its loop:
 
-1. Propose a wakeup time: `now + 30s` when idle, `now + 100ms` when tasks pend.
-2. `peep` the queue for anything due sooner; if found, lower the proposed wakeup
-   to that task's `wakeup_time` and flag `pending`.
-3. CAS the proposed time into `atom_next_wakeup_time`.
-4. Under `mtx`, reload `atom_next_wakeup_time` and `wait_until` on the condvar —
-   so the thread sleeps until the earliest task is due, or until an `add()`
-   notifies it sooner.
-5. On wake, `clean_checkpoint()`, then `walk()` every due task and hand each to
-   the run strategy (`static_cast<SchedulerImpl*>(this)->operator()(task)`), then
-   `clean()`.
+1. Capture the unsigned wakeup generation before inspecting the queue.
+2. Propose `now + 30s` during normal operation or `now + 100ms` during drainage, then lower that proposal to any earlier task found by `peep`.
+3. CAS the proposal into `atom_next_wakeup_time`.
+4. Under `mtx`, reload the deadline and generation. Wait only when the deadline is in the future and the generation still matches the captured value.
+5. Run `clean_checkpoint()`, walk due tasks through the run strategy, then clean retired slots.
 
-`add(task)` lowers `atom_next_wakeup_time` toward the new task's wakeup time and
-notifies the condvar, so a task scheduled sooner than the current sleep wakes the
-loop immediately. The mutex is held across the load-then-wait in the loop so an
-`add()` can't slip in between and be lost. One mutex, one condvar, a lock-free
-queue underneath.
+A successful `add(task)` increments the generation after queue publication and before observing or lowering the deadline. `end(wait)` increments it after publishing the drain countdown. These operations and the consumer's generation checks are sequentially consistent. A task or shutdown notification delivered before a stale proposal reaches its wait therefore invalidates that proposal, including when a producer does not lower the deadline.
 
-`end(wait)` sets a countdown that lets the loop drain pending work, then exit.
+The existing notifier mutex protects the final check and atomic unlock-and-wait. Queue inspection and trace callouts retain their original scope outside that critical section. Callback execution remains outside it. The correction adds one atomic read-modify-write per successful enqueue and shutdown request; it makes no throughput claim.
+
+The generation is private scheduler state. Rebuild all C++ objects that instantiate or embed a scheduler when upgrading this header. On the measured x86-64 macOS closure, `sizeof(Scheduler<Task>)` remains 9,024 bytes with 64-byte alignment because the field fits existing padding. Other platforms require their own layout measurement.
 
 ### Two run strategies
 

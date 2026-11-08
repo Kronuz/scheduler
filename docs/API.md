@@ -105,3 +105,9 @@ override.
 To recover Xapiand's exact behavior, the trace header maps the four macros back
 to Xapiand's `log.h` (`L_SCHEDULER`/`L_CALL`/`L_DEBUG_HOOK`/`L_EXC`) and the nine
 color names to `colors.h`.
+
+## Header compatibility
+
+Rebuild every C++ translation unit and library that instantiates or embeds a scheduler when upgrading the wakeup-generation revision. The private generation field participates in thread synchronization even on platforms where it fits existing padding. Callable APIs remain the same; no timer serialization or wire representation is introduced.
+
+The `scheduler_wakeup` regression forces notification completion before a paused sleep proposal resumes. It covers enqueue and shutdown ordering, the no-notify branch, trace reentry and callback rescheduling.

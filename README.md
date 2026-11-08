@@ -14,8 +14,7 @@ background work.
 ## ✨ Highlights
 
 - **A 24-hour wheel at 1 ms resolution** built on the lock-free
-  [stash](https://github.com/Kronuz/stash) slot store: adding a task never takes a
-  lock.
+  [stash](https://github.com/Kronuz/stash) slot store. Waking the scheduler uses its notifier mutex.
 - **Cancellable tasks.** `clear()` is one compare-and-swap; a cleared task is
   skipped when the wheel reaches it.
 - **Two runners.** `Scheduler` runs due tasks inline on its thread;
@@ -25,6 +24,8 @@ background work.
   latest arguments, with a randomized force window so a key touched forever still
   fires and many keys due at once spread out.
 - **Optional throttling**: a floor on how often a key can fire.
+
+The scheduler invalidates stale sleep proposals after task publication or shutdown. A task added during an empty-queue inspection does not rely on a notification remaining pending. Header upgrades require rebuilding C++ consumers; see [the wakeup protocol](ARCHITECTURE.md#basescheduler--the-thread-loop).
 
 ## 📦 Installation
 

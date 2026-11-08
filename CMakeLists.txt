@@ -50,6 +50,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(scheduler_test PRIVATE scheduler)
   add_test(NAME scheduler COMMAND scheduler_test)
 
+  add_executable(scheduler_wakeup_test test/wakeup.cc)
+  target_link_libraries(scheduler_wakeup_test PRIVATE scheduler)
+  add_test(NAME scheduler_wakeup COMMAND scheduler_wakeup_test)
+  set_tests_properties(scheduler_wakeup PROPERTIES TIMEOUT 30)
+
   # Allocation failure (no_memory). It replaces global operator new and delete,
   # which TSan's static runtime also defines (a link clash), so TSan builds skip
   # it; CI passes TSan through the per-config and linker flags.
