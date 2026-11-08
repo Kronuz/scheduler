@@ -254,6 +254,7 @@ public:
 		lk.unlock();
 
 		while (ending != 0) {
+			lk.lock();
 			if (--ending < 0) {
 				ending = -1;
 			}
@@ -280,6 +281,8 @@ public:
 				}
 			}
 
+			L_DEBUG_HOOK("BaseScheduler::BEFORE_PROPOSE", "scheduler wakeup proposal");
+
 			// Try setting the worked out wakeup time as the real next wakeup time:
 			if (atom_next_wakeup_time.compare_exchange_strong(next_wakeup_time, wakeup_time)) {
 				if (ending >= 0 && !pending) {
@@ -292,7 +295,6 @@ public:
 			// make sure we first lock mutex so there cannot be race condition between
 			// the time we load the next_wakeup_time and we actually start waiting:
 			L_DEBUG_HOOK("BaseScheduler::LOOP", "BaseScheduler::" + STEEL_BLUE + "LOOP" + CLEAR_COLOR + " - now:{}, next_wakeup_time:{}", std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::chrono::duration_cast<std::chrono::nanoseconds>(atom_next_wakeup_time.load().time_since_epoch()).count());
-			lk.lock();
 			next_wakeup_time = atom_next_wakeup_time.load();
 			if (next_wakeup_time > now) {
 				wakeup_signal.wait_until(lk, next_wakeup_time);
@@ -320,6 +322,8 @@ public:
 
 			auto next_wakeup_time = atom_next_wakeup_time.load();
 			while (next_wakeup_time > wakeup_time && !atom_next_wakeup_time.compare_exchange_weak(next_wakeup_time, wakeup_time)) { }
+
+			L_DEBUG_HOOK("BaseScheduler::ENQUEUED", "scheduler task enqueued");
 
 			auto now = std::chrono::steady_clock::now();
 			if (next_wakeup_time >= wakeup_time || next_wakeup_time <= now) {
