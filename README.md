@@ -156,6 +156,10 @@ cmake --build build --target scheduler_bench_post
 
 ## 📚 Documentation
 
+- [The Bag of Holding](https://kronuz.github.io/blog/bag-of-holding/):
+  the Familiars post that covers `scheduler` among the small helpers.
+- [Who Owns the Wheel](https://kronuz.github.io/blog/retiring-the-sparse-wheel/):
+  the Familiars post on why `scheduler` retires and what replaces it.
 - [docs/API.md](docs/API.md): `ScheduledTask`, `Scheduler`, `ThreadedScheduler`, `Debouncer`, and
   the tracing hooks.
 - [ARCHITECTURE.md](ARCHITECTURE.md): the wheel, the thread loop, the two runners, and the
