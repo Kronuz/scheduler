@@ -83,7 +83,7 @@ debounced burst.
 ## 📦 Installation
 
 Requires a C++20 compiler and CMake 3.14 or newer. CMake fetches
-[stash](https://github.com/Kronuz/stash), [threadpool](https://github.com/Kronuz/threadpool) and
+[stash](https://github.com/Kronuz/stash), [workpool](https://github.com/Kronuz/workpool) and
 [random](https://github.com/Kronuz/random) at pinned commits (random only when the build has no
 `random::random` target yet). CI builds and tests it on Linux (x86_64 with GCC and Clang, arm64),
 macOS (arm64, x86_64) and FreeBSD, plus ASan + UBSan and TSan builds.

@@ -27,15 +27,15 @@ loop (`STARTED`, `PEEPING`, `LOOP`, `ADDED_NOTIFY`, `WAKEUP`, `RUNNING`,
 
 ## Build & run
 
-The deps (`stash`, `threadpool`) are normally fetched by CMake. The simplest way
+The deps (`stash`, `workpool`) are normally fetched by CMake. The simplest way
 to build this example is from a top-level CMake build of the repo, which has
 already fetched them into `build/_deps`:
 
 ```sh
 # from the repo root, after `cmake -B build`
 STASH=build/_deps/stash-src
-TP=build/_deps/threadpool-src
-TPCFG=build/_deps/threadpool-build   # generated config.h lives here
+TP=build/_deps/workpool-src
+TPCFG=build/_deps/workpool-build   # generated config.h lives here
 
 c++ -std=c++20 \
   -Iexamples/colored_trace -I. -I"$STASH" -I"$TP" -I"$TPCFG" \

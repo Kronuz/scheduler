@@ -20,7 +20,7 @@ test/task_size.cc           ScheduledTask is 56 bytes, and the posted and filed 
 test/no_memory.cc           Allocation failure (`scheduler_no_memory`): add() and debounce() report it; a refused block in the worker's arrival queue runs a due task, drops the others and leaves the worker running. Not built under TSan (it replaces operator new).
 bench/bench_post.cc         What a producer pays to arm a task: add(), post(), post_ordered() (`SCHEDULER_BENCH`).
 examples/colored_trace/     Runnable demo that injects a real trace header to restore colored, formatted trace output.
-CMakeLists.txt              STATIC library `scheduler` (+ alias scheduler::scheduler); FetchContents stash + threadpool; CTest test `scheduler`.
+CMakeLists.txt              STATIC library `scheduler` (+ alias scheduler::scheduler); FetchContents stash + workpool; CTest test `scheduler`.
 LICENSE                     MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                   What it is, install, quick start.
 docs/API.md                 The API reference and the tracing hooks.
@@ -29,7 +29,7 @@ ARCHITECTURE.md             Internal design, the timing model, trade-offs.
 ```
 
 The library is header-only. Its three dependencies — [`stash`](https://github.com/Kronuz/stash)
-(the slot store), [`threadpool`](https://github.com/Kronuz/threadpool) (Thread +
+(the slot store), [`workpool`](https://github.com/Kronuz/workpool) (Thread +
 WorkPool + ThreadPolicyType), and [`random`](https://github.com/Kronuz/random)
 (`random_time`) — are pulled in by `FetchContent` at their `main` tips and provide
 `stash.h`, `thread.hh`, `work_pool.hh`, and `random.hh` on the include path.
@@ -40,16 +40,16 @@ WorkPool + ThreadPolicyType), and [`random`](https://github.com/Kronuz/random)
 cmake -B build && cmake --build build && ctest --test-dir build
 ```
 
-The first `cmake -B build` clones `stash` and `threadpool` from GitHub at
+The first `cmake -B build` clones `stash` and `workpool` from GitHub at
 their `main` tips. Expected output ends with
 `all scheduler tests passed`, exit 0. The CMake `scheduler` target is a `STATIC`
-library that requests `cxx_std_20`, links `stash` and `threadpool::threadpool`,
+library that requests `cxx_std_20`, links `stash` and `workpool::workpool`,
 and exposes the source dir as a `PUBLIC` include. The test target is
 `scheduler_test`; the registered CTest name is `scheduler`.
 
 ## Conventions
 
-- **C++20.** Required (the threadpool dep uses `std::format` for worker naming,
+- **C++20.** Required (the workpool dep uses `std::format` for worker naming,
   and the example uses `std::format`). Don't drop below it.
 - **No Xapiand headers.** The only includes are the C++ standard library, the two
   FetchContent'd deps (`stash.h`, `thread.hh`, `work_pool.hh`), and the bundled
@@ -68,9 +68,9 @@ and exposes the source dir as a `PUBLIC` include. The test target is
 ## Load-bearing invariants
 
 - **`ThreadPolicyType` and the policy template parameter must stay.** They come
-  from the `threadpool` dep and thread through `ScheduledTask`, `BaseScheduler`,
+  from the `workpool` dep and thread through `ScheduledTask`, `BaseScheduler`,
   `Scheduler`, `ThreadedScheduler`, `Debouncer`, and the factories. The policy is
-  runtime-ignored today (see the threadpool repo), but it is kept for
+  runtime-ignored today (see the workpool repo), but it is kept for
   source-compatibility with Xapiand's many call sites. Deleting it breaks every
   one of them.
 - **The color identifiers are referenced only inside trace-macro arguments.**
@@ -183,7 +183,7 @@ and exposes the source dir as a `PUBLIC` include. The test target is
 
 - **Don't delete `ThreadPolicyType`** thinking it is dead. It is unused at runtime
   but load-bearing at compile time for the consumer's call sites, and it comes
-  from the `threadpool` dep, not this repo.
+  from the `workpool` dep, not this repo.
 - **Don't add color stubs to `scheduler_trace.h` for the default build.** They are
   not needed — the no-op macros discard the color arguments before compilation.
   Adding them is dead code that suggests the wrong mental model.
@@ -197,10 +197,10 @@ and exposes the source dir as a `PUBLIC` include. The test target is
   that links both would carry two definitions. CMake reuses a consumer's
   `random::random` target when one exists, so declare random before scheduler if you
   name its FetchContent differently.
-- **The deps track `main`.** `CMakeLists.txt` fetches `stash` and `threadpool` at
+- **The deps track `main`.** `CMakeLists.txt` fetches `stash` and `workpool` at
   their tips, so a change there reaches this build (the nightly CI run catches
   drift). The wheel relies on `stash`'s `StashSlots`/`StashValues` API and the scheduler
-  on `threadpool`'s `Thread`/`WorkPool`/`WorkGroup`/`ThreadPolicyType`.
+  on `workpool`'s `Thread`/`WorkPool`/`WorkGroup`/`ThreadPolicyType`.
 
 ## Standalone vs. Xapiand
 

@@ -84,7 +84,7 @@ task before scheduling a new one.
 
 ### `BaseScheduler` — the thread loop
 
-`BaseScheduler` is a `Thread` (from the `threadpool` dep) parameterized on the
+`BaseScheduler` is a `Thread` (from the `workpool` dep) parameterized on the
 concrete scheduler `Impl` (CRTP) so it can call back into the right run strategy.
 Its loop:
 

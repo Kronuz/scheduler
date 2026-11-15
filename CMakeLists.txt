@@ -6,7 +6,7 @@ include(FetchContent)
 # --- Dependencies ---
 # The scheduler is built on three already-extracted standalone libraries:
 #   stash       — the lock-free hierarchical slot store (the timer-wheel primitive)
-#   threadpool  — Thread<Impl,policy> + ThreadPolicyType + WorkPool/WorkGroup
+#   workpool  — Thread<Impl,policy> + ThreadPolicyType + WorkPool/WorkGroup
 # Both are public (consumers see stash.h / thread.hh / work_pool.hh on their
 # include path), pinned by commit.
 FetchContent_Declare(
@@ -15,11 +15,11 @@ FetchContent_Declare(
   GIT_TAG        b7d887678a2149e38fd4bc9ec4491e414d76a81f
 )
 FetchContent_Declare(
-  threadpool
-  GIT_REPOSITORY https://github.com/Kronuz/threadpool.git
-  GIT_TAG        63e03a5deca9c91f08755d900c61885dd5e75822
+  workpool
+  GIT_REPOSITORY https://github.com/Kronuz/workpool.git
+  GIT_TAG        640c66bfebccae811377670a265b62f4878ede8a
 )
-FetchContent_MakeAvailable(stash threadpool)
+FetchContent_MakeAvailable(stash workpool)
 # random_time (the debouncer's force window) comes from the random library; reuse
 # a consumer's copy when it already made one available.
 if(NOT TARGET random::random)
@@ -37,7 +37,7 @@ endif()
 add_library(scheduler INTERFACE)
 target_include_directories(scheduler INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_features(scheduler INTERFACE cxx_std_20)
-target_link_libraries(scheduler INTERFACE stash threadpool::threadpool random::random)
+target_link_libraries(scheduler INTERFACE stash workpool::workpool random::random)
 # Alias so consumers can link `scheduler::scheduler` whether they add this via
 # add_subdirectory or FetchContent.
 add_library(scheduler::scheduler ALIAS scheduler)
